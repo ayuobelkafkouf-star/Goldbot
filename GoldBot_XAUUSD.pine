@@ -1,5 +1,5 @@
 //@version=5
-strategy("GoldBot XAUUSD v5.0", shorttitle="GoldBot v5.0", overlay=true,
+strategy("GoldBot XAUUSD v5.1", shorttitle="GoldBot v5.1", overlay=true,
   default_qty_type=strategy.percent_of_equity, default_qty_value=10,
   commission_type=strategy.commission.cash_per_contract, commission_value=0.35,
   slippage=5, margin_long=100, margin_short=100,
@@ -26,10 +26,19 @@ risk_pct    = input.float(0.5, "Rischio % per trade", group="Rischio", minval=0.
 sl_atr_mult = input.float(0.4, "SL buffer ATR", group="Rischio", minval=0.1, maxval=2.0, step=0.1)
 tp1_pct     = input.float(70,  "% chiusura TP1", group="Rischio", minval=10, maxval=90)
 use_be      = input.bool(true, "Break-even dopo TP1", group="Rischio")
+use_trail   = input.bool(true, "Trailing stop ATR dopo TP1", group="Rischio")
+trail_mult  = input.float(1.5, "Trailing ATR mult", group="Rischio", minval=0.5, maxval=5.0, step=0.1)
 
-use_hours  = input.bool(true, "Filtra orari", group="Filtri")
+use_session   = input.bool(true, "Filtro sessione London/NY overlap", group="Filtri")
+session_start = input.int(13, "Sessione start (Roma)", group="Filtri", minval=0, maxval=23)
+session_end   = input.int(17, "Sessione end (Roma)",   group="Filtri", minval=0, maxval=23)
+use_hours  = input.bool(false, "Filtra orari (fallback se sessione OFF)", group="Filtri")
 start_hour = input.int(8,  "Ora inizio", group="Filtri")
 end_hour   = input.int(20, "Ora fine",   group="Filtri")
+
+use_circuit  = input.bool(true, "Circuit breaker drawdown", group="Protezione")
+dd_threshold = input.float(5.0, "DD max % dal peak", group="Protezione", minval=1.0, maxval=20.0, step=0.5)
+pause_days   = input.int(3,    "Giorni pausa dopo trigger", group="Protezione", minval=1, maxval=14)
 use_atr    = input.bool(true, "Filtro ATR", group="Filtri")
 atr_min    = input.float(1.5, "ATR minimo", group="Filtri")
 cooldown_bars  = input.int(5, "Cooldown barre", group="Filtri")
@@ -121,7 +130,9 @@ confirm_buy  = spike_down and m15_close > m15_open and body_buy  >= m15_atr * bo
 
 // ─── FILTRI ───────────────────────────────────────────────
 h_now       = hour(time, "Europe/Rome")
-hour_ok     = not use_hours or (h_now >= start_hour and h_now < end_hour)
+session_ok  = h_now >= session_start and h_now < session_end
+hours_ok    = h_now >= start_hour and h_now < end_hour
+hour_ok     = use_session ? session_ok : (not use_hours or hours_ok)
 atr_ok      = not use_atr or atr_val >= atr_min
 rsi_ok_sell = m15_rsi > 45 and m15_rsi < rsi_ob
 rsi_ok_buy  = m15_rsi < 55 and m15_rsi > rsi_os
@@ -156,10 +167,24 @@ if new_day or na(day_eq)
 day_pct = (strategy.equity - day_eq) / day_eq * 100
 day_ok  = day_pct > -max_loss and day_pct < max_profit
 
-// ─── SEGNALI ──────────────────────────────────────────────
-final_sell = confirm_sell and price_at_supply and h1_bear and m15_bear and rsi_ok_sell and hour_ok and atr_ok and news_ok and cooldown_ok and trades_ok and day_ok and strategy.position_size == 0
+// ─── CIRCUIT BREAKER DRAWDOWN ─────────────────────────────
+var float eq_peak       = na
+var int   pause_until_d = 0
+var int   day_counter   = 0
+if new_day
+    day_counter := day_counter + 1
+if na(eq_peak) or strategy.equity > eq_peak
+    eq_peak := strategy.equity
+dd_pct = eq_peak > 0 ? (eq_peak - strategy.equity) / eq_peak * 100 : 0.0
+if use_circuit and dd_pct >= dd_threshold and day_counter >= pause_until_d
+    pause_until_d := day_counter + pause_days
+circuit_ok = not use_circuit or day_counter >= pause_until_d
+pause_left = math.max(0, pause_until_d - day_counter)
 
-final_buy  = confirm_buy  and price_at_demand and h1_bull and m15_bull and rsi_ok_buy  and hour_ok and atr_ok and news_ok and cooldown_ok and trades_ok and day_ok and strategy.position_size == 0
+// ─── SEGNALI ──────────────────────────────────────────────
+final_sell = confirm_sell and price_at_supply and h1_bear and m15_bear and rsi_ok_sell and hour_ok and atr_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and strategy.position_size == 0
+
+final_buy  = confirm_buy  and price_at_demand and h1_bull and m15_bull and rsi_ok_buy  and hour_ok and atr_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and strategy.position_size == 0
 
 // ─── PROBABILITÀ SETUP ────────────────────────────────────
 score_sell = 0
@@ -234,19 +259,40 @@ if final_sell
     tp1_box := box.new(bar_index, tp1_sell, bar_index+50, close,    bgcolor=color.new(color.green,70), border_color=color.new(color.green,40))
     sl_box  := box.new(bar_index, close,    bar_index+50, sl_sell,  bgcolor=color.new(color.red,70),   border_color=color.new(color.red,30))
 
-// ─── PARZIALE A TP1 + BREAK-EVEN ──────────────────────────
-// Quando il prezzo tocca TP1 chiudiamo il tp1_pct% e spostiamo SL a BE.
+// ─── PARZIALE A TP1 + BREAK-EVEN + TRAILING ───────────────
+// A TP1: chiusura parziale, SL a BE, poi (se use_trail) trailing ATR.
+var float trail_sl = na
+
 if strategy.position_size > 0 and not be_active and not na(tp1_buy) and high >= tp1_buy
     strategy.close("BUY", qty_percent=tp1_pct, comment="TP1")
     if use_be
         be_active := true
-        strategy.exit("BUY_EXIT", from_entry="BUY", stop=entry_px, limit=tp2_buy)
+        trail_sl := entry_px
+        strategy.exit("BUY_EXIT", from_entry="BUY", stop=trail_sl, limit=tp2_buy)
 
 if strategy.position_size < 0 and not be_active and not na(tp1_sell) and low <= tp1_sell
     strategy.close("SELL", qty_percent=tp1_pct, comment="TP1")
     if use_be
         be_active := true
-        strategy.exit("SELL_EXIT", from_entry="SELL", stop=entry_px, limit=tp2_sell)
+        trail_sl := entry_px
+        strategy.exit("SELL_EXIT", from_entry="SELL", stop=trail_sl, limit=tp2_sell)
+
+// Trailing stop: dopo BE alza/abbassa lo SL seguendo l'ATR, mai indietro.
+if use_trail and be_active
+    if strategy.position_size > 0 and not na(trail_sl)
+        new_sl = close - atr_val * trail_mult
+        if new_sl > trail_sl
+            trail_sl := new_sl
+            strategy.exit("BUY_EXIT", from_entry="BUY", stop=trail_sl, limit=tp2_buy)
+    if strategy.position_size < 0 and not na(trail_sl)
+        new_sl = close + atr_val * trail_mult
+        if new_sl < trail_sl
+            trail_sl := new_sl
+            strategy.exit("SELL_EXIT", from_entry="SELL", stop=trail_sl, limit=tp2_sell)
+
+if strategy.position_size == 0
+    trail_sl := na
+    be_active := false
 
 // ─── DISEGNO ZONE ─────────────────────────────────────────
 var box supply_box = na
@@ -286,14 +332,14 @@ var table t = table.new(position.middle_left, 2, 22, bgcolor=color.new(color.bla
 
 filter_status(cond) => cond ? "✅" : "❌"
 
-sl_display  = strategy.position_size > 0 ? str.tostring(math.round(sl_buy,2))   : strategy.position_size < 0 ? str.tostring(math.round(sl_sell,2))  : "─"
+sl_display  = strategy.position_size != 0 and not na(trail_sl) ? str.tostring(math.round(trail_sl,2)) : strategy.position_size > 0 ? str.tostring(math.round(sl_buy,2))   : strategy.position_size < 0 ? str.tostring(math.round(sl_sell,2))  : "─"
 tp1_display = strategy.position_size > 0 ? str.tostring(math.round(tp1_buy,2))  : strategy.position_size < 0 ? str.tostring(math.round(tp1_sell,2)) : "─"
 tp2_display = strategy.position_size > 0 ? str.tostring(math.round(tp2_buy,2))  : strategy.position_size < 0 ? str.tostring(math.round(tp2_sell,2)) : "─"
 supply_display = supply_active and not na(supply_top) ? str.tostring(math.round(supply_bot,2)) + " - " + str.tostring(math.round(supply_top,2)) : "─"
 demand_display = demand_active and not na(demand_top) ? str.tostring(math.round(demand_bot,2)) + " - " + str.tostring(math.round(demand_top,2)) : "─"
 
 if barstate.islast
-    table.cell(t, 0, 0,  "GoldBot v5.0",  text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.black,50))
+    table.cell(t, 0, 0,  "GoldBot v5.1",  text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.black,50))
     table.cell(t, 0, 1,  "H1 Trend",      text_color=color.gray, text_size=size.tiny)
     table.cell(t, 1, 1,  h1_bull ? "RIALZISTA ▲" : "RIBASSISTA ▼", text_color=h1_bull ? color.lime : color.red, text_size=size.tiny)
     table.cell(t, 0, 2,  "M15 Trend",     text_color=color.gray, text_size=size.tiny)
@@ -306,18 +352,20 @@ if barstate.islast
     table.cell(t, 1, 5,  demand_display,  text_color=demand_active ? color.lime : color.gray, text_size=size.tiny)
     table.cell(t, 0, 6,  "Notizie",       text_color=color.gray, text_size=size.tiny)
     table.cell(t, 1, 6,  news_ok ? "LIBERO ✅" : "PAUSA 🔴", text_color=news_ok ? color.lime : color.red, text_size=size.tiny)
-    table.cell(t, 0, 7,  "Orario",        text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 7,  hour_ok ? "ATTIVO" : "CHIUSO", text_color=hour_ok ? color.lime : color.orange, text_size=size.tiny)
+    table.cell(t, 0, 7,  use_session ? "Sessione" : "Orario", text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 7,  hour_ok ? (use_session ? "OVERLAP ✅" : "ATTIVO") : "CHIUSO", text_color=hour_ok ? color.lime : color.orange, text_size=size.tiny)
     table.cell(t, 0, 8,  "P&L Oggi",      text_color=color.gray, text_size=size.tiny)
     table.cell(t, 1, 8,  str.tostring(math.round(day_pct,2)) + "%", text_color=day_pct >= 0 ? color.lime : color.red, text_size=size.tiny)
     table.cell(t, 0, 9,  "Trade Oggi",    text_color=color.gray, text_size=size.tiny)
     table.cell(t, 1, 9,  str.tostring(trades_today) + "/" + str.tostring(max_trades_day), text_color=trades_ok ? color.lime : color.orange, text_size=size.tiny)
     table.cell(t, 0, 10, "SL/TP1/TP2",    text_color=color.gray, text_size=size.tiny)
     table.cell(t, 1, 10, sl_display + "/" + tp1_display + "/" + tp2_display, text_color=color.silver, text_size=size.tiny)
+    pos_tag = be_active ? (use_trail ? " TRAIL" : " BE") : ""
     table.cell(t, 0, 11, "Posizione",     text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 11, strategy.position_size > 0 ? "LONG 🟢" + (be_active ? " BE" : "") : strategy.position_size < 0 ? "SHORT 🔴" + (be_active ? " BE" : "") : "FLAT ⚪", text_color=strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.white, text_size=size.tiny)
-    table.cell(t, 0, 12, "Zone Stato",    text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 12, (supply_active ? "S✅ " : "S❌ ") + (demand_active ? "D✅" : "D❌"), text_color=color.white, text_size=size.tiny)
+    table.cell(t, 1, 11, strategy.position_size > 0 ? "LONG 🟢" + pos_tag : strategy.position_size < 0 ? "SHORT 🔴" + pos_tag : "FLAT ⚪", text_color=strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.white, text_size=size.tiny)
+    table.cell(t, 0, 12, "DD / Status",   text_color=color.gray, text_size=size.tiny)
+    circuit_txt = circuit_ok ? ("ACTIVE ✅  " + str.tostring(math.round(dd_pct,1)) + "%") : ("PAUSED 🛑 " + str.tostring(pause_left) + "g")
+    table.cell(t, 1, 12, circuit_txt, text_color=circuit_ok ? color.lime : color.red, text_size=size.tiny)
     table.cell(t, 0, 13, "Setup",         text_color=color.gray, text_size=size.tiny)
     table.cell(t, 1, 13, setup_quality + " (" + str.tostring(best_score) + ") " + best_dir, text_color=setup_color, text_size=size.tiny)
     table.cell(t, 0, 14, "── SELL ──",    text_color=color.red,  text_size=size.tiny, bgcolor=color.new(color.black,50))
