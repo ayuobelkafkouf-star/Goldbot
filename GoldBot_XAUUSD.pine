@@ -91,6 +91,13 @@ h1_bear  = h1_ef < h1_es
 m15_bull = m15_ef > m15_es
 m15_bear = m15_ef < m15_es
 
+// ─── MODALITÀ EFFETTIVA ───────────────────────────────────
+// Modalità aggressiva: override di sessione, cooldown, max trade e tolleranza retest.
+eff_use_session   = mode_aggressive ? false : use_session
+eff_cooldown_bars = mode_aggressive ? 2     : cooldown_bars
+eff_max_trades    = mode_aggressive ? 10    : max_trades_day
+eff_zone_tol      = mode_aggressive ? 0.7   : zone_tol
+
 // ─── MULTI-ZONE SUPPLY/DEMAND ─────────────────────────────
 // Manteniamo array delle ultime N zone supply e demand. Una zona si invalida
 // quando il prezzo la attraversa con forza (chiusura > top per supply, < bot per demand).
@@ -185,12 +192,6 @@ confirm_sell = spike_up   and m15_close < m15_open and body_sell >= m15_atr * bo
 confirm_buy  = spike_down and m15_close > m15_open and body_buy  >= m15_atr * body_mult
 
 // ─── FILTRI ───────────────────────────────────────────────
-// Modalità aggressiva: override di sessione, cooldown, max trade e tolleranza retest.
-eff_use_session   = mode_aggressive ? false : use_session
-eff_cooldown_bars = mode_aggressive ? 2     : cooldown_bars
-eff_max_trades    = mode_aggressive ? 10    : max_trades_day
-eff_zone_tol      = mode_aggressive ? 0.7   : zone_tol
-
 h_now       = hour(time, "Europe/Rome")
 session_ok  = h_now >= session_start and h_now < session_end
 hours_ok    = h_now >= start_hour and h_now < end_hour
