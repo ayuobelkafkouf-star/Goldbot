@@ -6,8 +6,11 @@ strategy("GoldBot XAUUSD v5.2", shorttitle="GoldBot v5.2", overlay=true,
   calc_on_every_tick=false, process_orders_on_close=true)
 
 // ─── INPUTS ───────────────────────────────────────────────
-mode_aggressive = input.bool(false, "Modalità Aggressiva (più trade)", group="Modalità", tooltip="Disabilita sessione, riduce cooldown, alza max trade/giorno, allarga tolleranza retest")
-min_score       = input.int(60, "Score minimo per trade", group="Modalità", minval=0, maxval=100, tooltip="Blocca trade con score inferiore. 0 = nessun filtro score.")
+mode = input.string("Conservativo", "Modalità operativa",
+   options=["Conservativo", "Sessione Estesa", "Aggressivo"],
+   group="Modalità",
+   tooltip="Conservativo: solo overlap 13-17, score 60, max 5 trade/g. Sessione Estesa: 8-20, score MIN 70 (qualità protetta), max 5 trade/g. Aggressivo: 8-20, score 60, max 10 trade/g, cooldown 2.")
+min_score       = input.int(60, "Score minimo per trade", group="Modalità", minval=0, maxval=100, tooltip="Soglia base. In Sessione Estesa diventa min 70 automaticamente.")
 max_zones       = input.int(5, "Zone attive max per lato", group="Modalità", minval=1, maxval=10)
 
 h1_fast  = input.int(21, "H1 EMA veloce", group="Trend H1")
@@ -92,11 +95,17 @@ m15_bull = m15_ef > m15_es
 m15_bear = m15_ef < m15_es
 
 // ─── MODALITÀ EFFETTIVA ───────────────────────────────────
-// Modalità aggressiva: override di sessione, cooldown, max trade e tolleranza retest.
-eff_use_session   = mode_aggressive ? false : use_session
-eff_cooldown_bars = mode_aggressive ? 2     : cooldown_bars
-eff_max_trades    = mode_aggressive ? 10    : max_trades_day
-eff_zone_tol      = mode_aggressive ? 0.7   : zone_tol
+// 3 modalità: Conservativo (overlap 13-17), Sessione Estesa (8-20 con score floor 70), Aggressivo (8-20 + meno cooldown).
+is_conservative = mode == "Conservativo"
+is_extended     = mode == "Sessione Estesa"
+is_aggressive   = mode == "Aggressivo"
+
+eff_use_session   = is_conservative  // solo conservativo usa overlap stretto
+eff_force_hours   = is_extended or is_aggressive  // estesa/aggressiva usano fascia 8-20
+eff_cooldown_bars = is_aggressive ? 2  : cooldown_bars
+eff_max_trades    = is_aggressive ? 10 : max_trades_day
+eff_zone_tol      = is_aggressive ? 0.7 : zone_tol
+eff_min_score     = is_extended ? math.max(min_score, 70) : min_score
 
 // ─── MULTI-ZONE SUPPLY/DEMAND ─────────────────────────────
 // Manteniamo array delle ultime N zone supply e demand. Una zona si invalida
@@ -195,7 +204,8 @@ confirm_buy  = spike_down and m15_close > m15_open and body_buy  >= m15_atr * bo
 h_now       = hour(time, "Europe/Rome")
 session_ok  = h_now >= session_start and h_now < session_end
 hours_ok    = h_now >= start_hour and h_now < end_hour
-hour_ok     = eff_use_session ? session_ok : (not use_hours or hours_ok)
+// Conservativo → overlap; Estesa/Aggressiva → fascia 8-20 forzata; altrimenti rispetta use_hours.
+hour_ok     = eff_use_session ? session_ok : eff_force_hours ? hours_ok : (not use_hours or hours_ok)
 atr_ok      = not use_atr or atr_val >= atr_min
 rsi_ok_sell = m15_rsi > 45 and m15_rsi < rsi_ob
 rsi_ok_buy  = m15_rsi < 55 and m15_rsi > rsi_os
@@ -266,8 +276,8 @@ best_dir   = score_sell > score_buy ? "SELL" : score_buy > score_sell ? "BUY" : 
 setup_quality = best_score >= 80 ? "FORTE 🟢" : best_score >= 50 ? "MEDIO 🟡" : "DEBOLE 🔴"
 setup_color   = best_score >= 80 ? color.lime : best_score >= 50 ? color.yellow : color.red
 
-score_ok_sell = score_sell >= min_score
-score_ok_buy  = score_buy  >= min_score
+score_ok_sell = score_sell >= eff_min_score
+score_ok_buy  = score_buy  >= eff_min_score
 
 // ─── SEGNALI ──────────────────────────────────────────────
 final_sell = confirm_sell and price_at_supply and h1_bear and m15_bear and rsi_ok_sell and hour_ok and atr_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_sell and strategy.position_size == 0
@@ -388,7 +398,8 @@ supply_display = sup_count > 0 ? str.tostring(sup_count) + " attive (ultima: " +
 demand_display = dem_count > 0 ? str.tostring(dem_count) + " attive (ultima: " + str.tostring(math.round(array.get(dem_bots, dem_count-1),2)) + "-" + str.tostring(math.round(array.get(dem_tops, dem_count-1),2)) + ")" : "─"
 
 if barstate.islast
-    table.cell(t, 0, 0,  "GoldBot v5.2" + (mode_aggressive ? " ⚡" : ""),  text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.black,50))
+    mode_badge = is_aggressive ? " ⚡" : is_extended ? " 🕐" : ""
+    table.cell(t, 0, 0,  "GoldBot v5.2" + mode_badge,  text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.black,50))
     table.cell(t, 0, 1,  "H1 Trend",      text_color=color.gray, text_size=size.tiny)
     table.cell(t, 1, 1,  h1_bull ? "RIALZISTA ▲" : "RIBASSISTA ▼", text_color=h1_bull ? color.lime : color.red, text_size=size.tiny)
     table.cell(t, 0, 2,  "M15 Trend",     text_color=color.gray, text_size=size.tiny)
@@ -401,8 +412,10 @@ if barstate.islast
     table.cell(t, 1, 5,  demand_display,  text_color=dem_count > 0 ? color.lime : color.gray, text_size=size.tiny)
     table.cell(t, 0, 6,  "Notizie",       text_color=color.gray, text_size=size.tiny)
     table.cell(t, 1, 6,  news_ok ? "LIBERO ✅" : "PAUSA 🔴", text_color=news_ok ? color.lime : color.red, text_size=size.tiny)
-    table.cell(t, 0, 7,  use_session ? "Sessione" : "Orario", text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 7,  hour_ok ? (use_session ? "OVERLAP ✅" : "ATTIVO") : "CHIUSO", text_color=hour_ok ? color.lime : color.orange, text_size=size.tiny)
+    sess_label = eff_use_session ? "Sessione" : eff_force_hours ? "Orario 8-20" : "Orario"
+    sess_value = hour_ok ? (eff_use_session ? "OVERLAP ✅" : "ATTIVO ✅") : "CHIUSO"
+    table.cell(t, 0, 7,  sess_label, text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 7,  sess_value, text_color=hour_ok ? color.lime : color.orange, text_size=size.tiny)
     table.cell(t, 0, 8,  "P&L Oggi",      text_color=color.gray, text_size=size.tiny)
     table.cell(t, 1, 8,  str.tostring(math.round(day_pct,2)) + "%", text_color=day_pct >= 0 ? color.lime : color.red, text_size=size.tiny)
     table.cell(t, 0, 9,  "Trade Oggi",    text_color=color.gray, text_size=size.tiny)
