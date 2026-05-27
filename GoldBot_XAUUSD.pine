@@ -390,6 +390,22 @@ plot(h1_es,  "EMA55 H1",  color=color.new(color.purple, 40), linewidth=2, displa
 plot(m15_ef, "EMA21 M15", color=color.new(color.aqua,   40), linewidth=1, display=display.none)
 plot(m15_es, "EMA55 M15", color=color.new(color.orange, 40), linewidth=1, display=display.none)
 
+// Plot invisibili per iniettare SL/TP/Score nei placeholder {{plot_X}} delle alertcondition (piano FREE).
+plot_sl_buy_v   = final_buy  ? m15_low  - atr_val * sl_atr_mult : na
+plot_tp1_buy_v  = final_buy  ? m15_struct_high : na
+plot_tp2_buy_v  = final_buy  ? h1_struct_high  : na
+plot_sl_sell_v  = final_sell ? m15_high + atr_val * sl_atr_mult : na
+plot_tp1_sell_v = final_sell ? m15_struct_low  : na
+plot_tp2_sell_v = final_sell ? h1_struct_low   : na
+plot(plot_sl_buy_v,   "SL Buy",     display=display.none)  // {{plot_4}}
+plot(plot_tp1_buy_v,  "TP1 Buy",    display=display.none)  // {{plot_5}}
+plot(plot_tp2_buy_v,  "TP2 Buy",    display=display.none)  // {{plot_6}}
+plot(score_buy,       "Score Buy",  display=display.none)  // {{plot_7}}
+plot(plot_sl_sell_v,  "SL Sell",    display=display.none)  // {{plot_8}}
+plot(plot_tp1_sell_v, "TP1 Sell",   display=display.none)  // {{plot_9}}
+plot(plot_tp2_sell_v, "TP2 Sell",   display=display.none)  // {{plot_10}}
+plot(score_sell,      "Score Sell", display=display.none)  // {{plot_11}}
+
 plotshape(final_sell, title="Conf SELL", style=shape.triangledown, location=location.abovebar, color=color.new(color.orange,0), size=size.small, text="CS")
 plotshape(final_buy,  title="Conf BUY",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.yellow,0), size=size.small, text="CB")
 plotshape(bar_index == last_buy_bar,  title="BUY",  style=shape.triangleup,   location=location.belowbar, color=color.lime, size=size.large, text="BUY")
@@ -397,10 +413,9 @@ plotshape(bar_index == last_sell_bar, title="SELL", style=shape.triangledown, lo
 bgcolor(not news_ok ? color.new(color.orange,90) : na)
 
 // ─── ALERT ────────────────────────────────────────────────
-// alertcondition: testo statico (TradingView non legge variabili calcolate qui).
-// Per messaggi ricchi (SL/TP/Score/Mode) vedi le alert() dinamiche nei blocchi if final_buy/final_sell.
-alertcondition(final_buy,  title="GoldBot BUY",  message="🟢 GoldBot v5.2 BUY  {{ticker}} {{interval}} @ {{close}}")
-alertcondition(final_sell, title="GoldBot SELL", message="🔴 GoldBot v5.2 SELL {{ticker}} {{interval}} @ {{close}}")
+// alertcondition con placeholder {{plot_X}}: funziona sul piano FREE e include SL/TP/Score.
+alertcondition(final_buy,  title="GoldBot BUY",  message="🟢 GoldBot BUY {{ticker}} {{interval}}\nEntry: {{close}}\nSL: {{plot_4}}\nTP1: {{plot_5}}\nTP2: {{plot_6}}\nScore: {{plot_7}}")
+alertcondition(final_sell, title="GoldBot SELL", message="🔴 GoldBot SELL {{ticker}} {{interval}}\nEntry: {{close}}\nSL: {{plot_8}}\nTP1: {{plot_9}}\nTP2: {{plot_10}}\nScore: {{plot_11}}")
 
 // ─── TABELLA ──────────────────────────────────────────────
 var table t = table.new(position.middle_left, 2, 22, bgcolor=color.new(color.black,70), border_width=1, border_color=color.new(color.yellow,60))
