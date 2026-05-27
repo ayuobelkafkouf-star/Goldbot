@@ -7,9 +7,9 @@ strategy("GoldBot XAUUSD v5.2", shorttitle="GoldBot v5.2", overlay=true,
 
 // ─── INPUTS ───────────────────────────────────────────────
 mode = input.string("Conservativo", "Modalità operativa",
-   options=["Conservativo", "Sessione Estesa", "Aggressivo"],
+   options=["Conservativo", "Sessione Estesa", "Aggressivo", "24h Estremo"],
    group="Modalità",
-   tooltip="Conservativo: solo overlap 13-17, score 60, max 5 trade/g. Sessione Estesa: 8-20, score MIN 70 (qualità protetta), max 5 trade/g. Aggressivo: 8-20, score 60, max 10 trade/g, cooldown 2.")
+   tooltip="Conservativo: 13-17, score 60, max 5 trade/g. Sessione Estesa: 8-20, score MIN 70, max 5 trade/g. Aggressivo: 8-20, score 60, max 10 trade/g, cooldown 2. 24h ESTREMO: 24h, score 55, max 15 trade/g, cooldown 2 (RISCHIOSO).")
 min_score       = input.int(60, "Score minimo per trade", group="Modalità", minval=0, maxval=100, tooltip="Soglia base. In Sessione Estesa diventa min 70 automaticamente.")
 max_zones       = input.int(5, "Zone attive max per lato", group="Modalità", minval=1, maxval=10)
 
@@ -95,17 +95,19 @@ m15_bull = m15_ef > m15_es
 m15_bear = m15_ef < m15_es
 
 // ─── MODALITÀ EFFETTIVA ───────────────────────────────────
-// 3 modalità: Conservativo (overlap 13-17), Sessione Estesa (8-20 con score floor 70), Aggressivo (8-20 + meno cooldown).
+// 4 modalità: Conservativo (13-17), Sessione Estesa (8-20, score 70), Aggressivo (8-20, cd 2), 24h Estremo (24h, score 55).
 is_conservative = mode == "Conservativo"
 is_extended     = mode == "Sessione Estesa"
 is_aggressive   = mode == "Aggressivo"
+is_extreme      = mode == "24h Estremo"
 
-eff_use_session   = is_conservative  // solo conservativo usa overlap stretto
-eff_force_hours   = is_extended or is_aggressive  // estesa/aggressiva usano fascia 8-20
-eff_cooldown_bars = is_aggressive ? 2  : cooldown_bars
-eff_max_trades    = is_aggressive ? 10 : max_trades_day
-eff_zone_tol      = is_aggressive ? 0.7 : zone_tol
-eff_min_score     = is_extended ? math.max(min_score, 70) : min_score
+eff_use_session   = is_conservative
+eff_force_hours   = is_extended or is_aggressive
+eff_no_hour_limit = is_extreme  // 24h Estremo bypassa qualsiasi filtro orario
+eff_cooldown_bars = is_aggressive or is_extreme ? 2  : cooldown_bars
+eff_max_trades    = is_extreme ? 15 : is_aggressive ? 10 : max_trades_day
+eff_zone_tol      = is_aggressive or is_extreme ? 0.7 : zone_tol
+eff_min_score     = is_extreme ? 55 : is_extended ? math.max(min_score, 70) : min_score
 
 // ─── MULTI-ZONE SUPPLY/DEMAND ─────────────────────────────
 // Manteniamo array delle ultime N zone supply e demand. Una zona si invalida
@@ -205,7 +207,7 @@ h_now       = hour(time, "Europe/Rome")
 session_ok  = h_now >= session_start and h_now < session_end
 hours_ok    = h_now >= start_hour and h_now < end_hour
 // Conservativo → overlap; Estesa/Aggressiva → fascia 8-20 forzata; altrimenti rispetta use_hours.
-hour_ok     = eff_use_session ? session_ok : eff_force_hours ? hours_ok : (not use_hours or hours_ok)
+hour_ok     = eff_no_hour_limit ? true : eff_use_session ? session_ok : eff_force_hours ? hours_ok : (not use_hours or hours_ok)
 atr_ok      = not use_atr or atr_val >= atr_min
 rsi_ok_sell = m15_rsi > 45 and m15_rsi < rsi_ob
 rsi_ok_buy  = m15_rsi < 55 and m15_rsi > rsi_os
@@ -383,6 +385,42 @@ if use_trail and be_active
 if strategy.position_size == 0
     trail_sl := na
     be_active := false
+
+// ─── DEBUG VISIVO ────────────────────────────────────────
+// Mostra sulla candela CORRENTE perché il bot non sta entrando, sia lato BUY che SELL.
+// Si aggiorna in tempo reale e ti dice esattamente quali filtri sono ❌.
+show_debug = input.bool(true, "Mostra debug filtri sulla candela corrente", group="Debug")
+
+var label dbg_label = na
+if barstate.islast and show_debug
+    label.delete(dbg_label)
+    sell_reasons = ""
+    buy_reasons  = ""
+    sell_reasons := sell_reasons + (confirm_sell    ? "✅" : "❌") + " Spike+Body SELL\n"
+    sell_reasons := sell_reasons + (price_at_supply ? "✅" : "❌") + " Zona Supply attiva\n"
+    sell_reasons := sell_reasons + (h1_bear         ? "✅" : "❌") + " H1 ribassista\n"
+    sell_reasons := sell_reasons + (m15_bear        ? "✅" : "❌") + " M15 ribassista\n"
+    sell_reasons := sell_reasons + (rsi_ok_sell     ? "✅" : "❌") + " RSI ok (" + str.tostring(math.round(m15_rsi,1)) + ")\n"
+    sell_reasons := sell_reasons + (score_ok_sell   ? "✅" : "❌") + " Score " + str.tostring(score_sell) + "/" + str.tostring(eff_min_score) + "\n"
+    buy_reasons := buy_reasons + (confirm_buy     ? "✅" : "❌") + " Spike+Body BUY\n"
+    buy_reasons := buy_reasons + (price_at_demand ? "✅" : "❌") + " Zona Demand attiva\n"
+    buy_reasons := buy_reasons + (h1_bull         ? "✅" : "❌") + " H1 rialzista\n"
+    buy_reasons := buy_reasons + (m15_bull        ? "✅" : "❌") + " M15 rialzista\n"
+    buy_reasons := buy_reasons + (rsi_ok_buy      ? "✅" : "❌") + " RSI ok (" + str.tostring(math.round(m15_rsi,1)) + ")\n"
+    buy_reasons := buy_reasons + (score_ok_buy    ? "✅" : "❌") + " Score " + str.tostring(score_buy) + "/" + str.tostring(eff_min_score) + "\n"
+    common = ""
+    common := common + (hour_ok     ? "✅" : "❌") + " Orario\n"
+    common := common + (atr_ok      ? "✅" : "❌") + " ATR (" + str.tostring(math.round(atr_val,2)) + ")\n"
+    common := common + (news_ok     ? "✅" : "❌") + " Notizie\n"
+    common := common + (cooldown_ok ? "✅" : "❌") + " Cooldown (" + str.tostring(bar_index - last_close_bar) + "/" + str.tostring(eff_cooldown_bars) + ")\n"
+    common := common + (trades_ok   ? "✅" : "❌") + " Trade " + str.tostring(trades_today) + "/" + str.tostring(eff_max_trades) + "\n"
+    common := common + (day_ok      ? "✅" : "❌") + " P&L giorno (" + str.tostring(math.round(day_pct,2)) + "%)\n"
+    common := common + (circuit_ok  ? "✅" : "❌") + " Circuit breaker\n"
+    flat = strategy.position_size == 0
+    pos_status = flat ? "✅ Flat (può entrare)" : "❌ Posizione aperta"
+    title = final_buy ? "🟢 ENTRATA BUY!" : final_sell ? "🔴 ENTRATA SELL!" : "⏸️ NESSUNA ENTRATA"
+    txt = title + "\n──── FILTRI COMUNI ────\n" + common + pos_status + "\n──── BUY ────\n" + buy_reasons + "──── SELL ────\n" + sell_reasons
+    dbg_label := label.new(bar_index, high + atr_val * 2, txt, style=label.style_label_left, color=color.new(color.black, 15), textcolor=color.white, size=size.small)
 
 // ─── PLOT ────────────────────────────────────────────────
 plot(h1_ef,  "EMA21 H1",  color=color.new(color.blue,   40), linewidth=2, display=display.none)
