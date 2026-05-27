@@ -319,6 +319,13 @@ if final_buy
     tp2_box := box.new(bar_index, tp1_buy, bar_index+50, tp2_buy, bgcolor=color.new(color.green,50), border_color=color.new(color.green,20))
     tp1_box := box.new(bar_index, close,   bar_index+50, tp1_buy, bgcolor=color.new(color.green,70), border_color=color.new(color.green,40))
     sl_box  := box.new(bar_index, sl_buy,  bar_index+50, close,   bgcolor=color.new(color.red,70),   border_color=color.new(color.red,30))
+    alert("🟢 GoldBot BUY XAUUSD" +
+          "\nEntry: "  + str.tostring(close,   "#.##") +
+          "\nSL: "     + str.tostring(sl_buy,  "#.##") +
+          "\nTP1: "    + str.tostring(tp1_buy, "#.##") +
+          "\nTP2: "    + str.tostring(tp2_buy, "#.##") +
+          "\nScore: "  + str.tostring(score_buy) +
+          "\nMode: "   + mode, alert.freq_once_per_bar_close)
 
 if final_sell
     last_sell_bar := bar_index
@@ -334,6 +341,13 @@ if final_sell
     tp2_box := box.new(bar_index, tp2_sell, bar_index+50, tp1_sell, bgcolor=color.new(color.green,50), border_color=color.new(color.green,20))
     tp1_box := box.new(bar_index, tp1_sell, bar_index+50, close,    bgcolor=color.new(color.green,70), border_color=color.new(color.green,40))
     sl_box  := box.new(bar_index, close,    bar_index+50, sl_sell,  bgcolor=color.new(color.red,70),   border_color=color.new(color.red,30))
+    alert("🔴 GoldBot SELL XAUUSD" +
+          "\nEntry: "  + str.tostring(close,    "#.##") +
+          "\nSL: "     + str.tostring(sl_sell,  "#.##") +
+          "\nTP1: "    + str.tostring(tp1_sell, "#.##") +
+          "\nTP2: "    + str.tostring(tp2_sell, "#.##") +
+          "\nScore: "  + str.tostring(score_sell) +
+          "\nMode: "   + mode, alert.freq_once_per_bar_close)
 
 // ─── PARZIALE A TP1 + BREAK-EVEN + TRAILING ───────────────
 // A TP1: chiusura parziale, SL a BE, poi (se use_trail) trailing ATR.
@@ -383,8 +397,10 @@ plotshape(bar_index == last_sell_bar, title="SELL", style=shape.triangledown, lo
 bgcolor(not news_ok ? color.new(color.orange,90) : na)
 
 // ─── ALERT ────────────────────────────────────────────────
-alertcondition(final_buy,  title="GoldBot BUY",  message="GoldBot v5.2 BUY  XAUUSD @ {{close}}")
-alertcondition(final_sell, title="GoldBot SELL", message="GoldBot v5.2 SELL XAUUSD @ {{close}}")
+// alertcondition: testo statico (TradingView non legge variabili calcolate qui).
+// Per messaggi ricchi (SL/TP/Score/Mode) vedi le alert() dinamiche nei blocchi if final_buy/final_sell.
+alertcondition(final_buy,  title="GoldBot BUY",  message="🟢 GoldBot v5.2 BUY  {{ticker}} {{interval}} @ {{close}}")
+alertcondition(final_sell, title="GoldBot SELL", message="🔴 GoldBot v5.2 SELL {{ticker}} {{interval}} @ {{close}}")
 
 // ─── TABELLA ──────────────────────────────────────────────
 var table t = table.new(position.middle_left, 2, 22, bgcolor=color.new(color.black,70), border_width=1, border_color=color.new(color.yellow,60))
