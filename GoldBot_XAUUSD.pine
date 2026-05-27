@@ -7,9 +7,9 @@ strategy("GoldBot XAUUSD v5.2", shorttitle="GoldBot v5.2", overlay=true,
 
 // ─── INPUTS ───────────────────────────────────────────────
 mode = input.string("Conservativo", "Modalità operativa",
-   options=["Conservativo", "Sessione Estesa", "Aggressivo", "24h Estremo"],
+   options=["Conservativo", "Sessione Estesa", "Aggressivo", "24h Qualità"],
    group="Modalità",
-   tooltip="Conservativo: 13-17, score 60, max 5 trade/g. Sessione Estesa: 8-20, score MIN 70, max 5 trade/g. Aggressivo: 8-20, score 60, max 10 trade/g, cooldown 2. 24h ESTREMO: 24h, score 55, max 15 trade/g, cooldown 2 (RISCHIOSO).")
+   tooltip="Conservativo: 13-17, score 60, max 5 trade/g. Sessione Estesa: 8-20, score MIN 70, max 5 trade/g. Aggressivo: 8-20, score 60, max 10 trade/g, cooldown 2. 24h QUALITÀ: 24h, score MIN 75, spike+body più stretti, max 8 trade/g, cooldown 3 (selettivo).")
 min_score       = input.int(60, "Score minimo per trade", group="Modalità", minval=0, maxval=100, tooltip="Soglia base. In Sessione Estesa diventa min 70 automaticamente.")
 max_zones       = input.int(5, "Zone attive max per lato", group="Modalità", minval=1, maxval=10)
 
@@ -95,19 +95,22 @@ m15_bull = m15_ef > m15_es
 m15_bear = m15_ef < m15_es
 
 // ─── MODALITÀ EFFETTIVA ───────────────────────────────────
-// 4 modalità: Conservativo (13-17), Sessione Estesa (8-20, score 70), Aggressivo (8-20, cd 2), 24h Estremo (24h, score 55).
+// 4 modalità: Conservativo (13-17), Sessione Estesa (8-20, score 70), Aggressivo (8-20, cd 2), 24h Qualità (24h, score 75, spike+body stretti).
 is_conservative = mode == "Conservativo"
 is_extended     = mode == "Sessione Estesa"
 is_aggressive   = mode == "Aggressivo"
-is_extreme      = mode == "24h Estremo"
+is_quality_24h  = mode == "24h Qualità"
 
 eff_use_session   = is_conservative
 eff_force_hours   = is_extended or is_aggressive
-eff_no_hour_limit = is_extreme  // 24h Estremo bypassa qualsiasi filtro orario
-eff_cooldown_bars = is_aggressive or is_extreme ? 2  : cooldown_bars
-eff_max_trades    = is_extreme ? 15 : is_aggressive ? 10 : max_trades_day
-eff_zone_tol      = is_aggressive or is_extreme ? 0.7 : zone_tol
-eff_min_score     = is_extreme ? 55 : is_extended ? math.max(min_score, 70) : min_score
+eff_no_hour_limit = is_quality_24h  // 24h Qualità bypassa il filtro orario
+eff_cooldown_bars = is_aggressive ? 2 : is_quality_24h ? 3 : cooldown_bars
+eff_max_trades    = is_quality_24h ? 8 : is_aggressive ? 10 : max_trades_day
+eff_zone_tol      = is_quality_24h ? zone_tol : is_aggressive ? 0.7 : zone_tol  // 24h Qualità: tolleranza stretta default
+eff_min_score     = is_quality_24h ? 75 : is_extended ? math.max(min_score, 70) : min_score
+// 24h Qualità: spike e body più stretti per filtrare segnali deboli
+eff_spike_mult    = is_quality_24h ? math.max(spike_mult, 0.7) : spike_mult
+eff_body_mult     = is_quality_24h ? math.max(body_mult,  0.5) : body_mult
 
 // ─── MULTI-ZONE SUPPLY/DEMAND ─────────────────────────────
 // Manteniamo array delle ultime N zone supply e demand. Una zona si invalida
@@ -193,14 +196,14 @@ sup_count = array.size(sup_tops)
 dem_count = array.size(dem_tops)
 
 // ─── SPIKE + CONFERMA ─────────────────────────────────────
-spike_up   = (m15_high - m15_low) >= m15_atr * spike_mult and m15_high > m15_high[1]
-spike_down = (m15_high - m15_low) >= m15_atr * spike_mult and m15_low  < m15_low[1]
+spike_up   = (m15_high - m15_low) >= m15_atr * eff_spike_mult and m15_high > m15_high[1]
+spike_down = (m15_high - m15_low) >= m15_atr * eff_spike_mult and m15_low  < m15_low[1]
 
 body_sell = m15_open - m15_close
 body_buy  = m15_close - m15_open
 
-confirm_sell = spike_up   and m15_close < m15_open and body_sell >= m15_atr * body_mult
-confirm_buy  = spike_down and m15_close > m15_open and body_buy  >= m15_atr * body_mult
+confirm_sell = spike_up   and m15_close < m15_open and body_sell >= m15_atr * eff_body_mult
+confirm_buy  = spike_down and m15_close > m15_open and body_buy  >= m15_atr * eff_body_mult
 
 // ─── FILTRI ───────────────────────────────────────────────
 h_now       = hour(time, "Europe/Rome")
@@ -467,7 +470,7 @@ supply_display = sup_count > 0 ? str.tostring(sup_count) + " attive (ultima: " +
 demand_display = dem_count > 0 ? str.tostring(dem_count) + " attive (ultima: " + str.tostring(math.round(array.get(dem_bots, dem_count-1),2)) + "-" + str.tostring(math.round(array.get(dem_tops, dem_count-1),2)) + ")" : "─"
 
 if barstate.islast
-    mode_badge = is_aggressive ? " ⚡" : is_extended ? " 🕐" : ""
+    mode_badge = is_quality_24h ? " 💎" : is_aggressive ? " ⚡" : is_extended ? " 🕐" : ""
     table.cell(t, 0, 0,  "GoldBot v5.2" + mode_badge,  text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.black,50))
     table.cell(t, 0, 1,  "H1 Trend",      text_color=color.gray, text_size=size.tiny)
     table.cell(t, 1, 1,  h1_bull ? "RIALZISTA ▲" : "RIBASSISTA ▼", text_color=h1_bull ? color.lime : color.red, text_size=size.tiny)
