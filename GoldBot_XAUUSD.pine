@@ -212,8 +212,12 @@ hours_ok    = h_now >= start_hour and h_now < end_hour
 // Conservativo → overlap; Estesa/Aggressiva → fascia 8-20 forzata; altrimenti rispetta use_hours.
 hour_ok     = eff_no_hour_limit ? true : eff_use_session ? session_ok : eff_force_hours ? hours_ok : (not use_hours or hours_ok)
 atr_ok      = not use_atr or atr_val >= atr_min
-rsi_ok_sell = m15_rsi > 45 and m15_rsi < rsi_ob
-rsi_ok_buy  = m15_rsi < 55 and m15_rsi > rsi_os
+// Bypass RSI quando trend H1 + M15 + zona sono tutti allineati: in trend forti RSI resta
+// oversold/overbought e bloccherebbe le continuation. Se mancano allineamenti, RSI filtra.
+strong_sell_alignment = h1_bear and m15_bear and price_at_supply
+strong_buy_alignment  = h1_bull and m15_bull and price_at_demand
+rsi_ok_sell = strong_sell_alignment or (m15_rsi > 45 and m15_rsi < rsi_ob)
+rsi_ok_buy  = strong_buy_alignment  or (m15_rsi < 55 and m15_rsi > rsi_os)
 
 current_hour = hour(time, "Europe/Rome")
 current_min  = minute(time, "Europe/Rome")
