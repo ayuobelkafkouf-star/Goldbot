@@ -531,3 +531,54 @@ if barstate.islast
     table.cell(t, 1, 20, filter_status(price_at_demand), text_color=price_at_demand ? color.lime : color.red, text_size=size.tiny)
     table.cell(t, 0, 21, "Spike + Conf",  text_color=color.gray, text_size=size.tiny)
     table.cell(t, 1, 21, filter_status(confirm_buy), text_color=confirm_buy ? color.lime : color.red, text_size=size.tiny)
+
+// ─── TABELLA STATISTICHE BACKTEST ────────────────────────
+// Mostra le metriche aggregate del backtest in alto a destra. Si aggiorna live.
+var table stats = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black,70), border_width=1, border_color=color.new(color.aqua,60))
+
+if barstate.islast
+    closed     = strategy.closedtrades
+    wins       = strategy.wintrades
+    losses     = strategy.losstrades
+    win_rate   = closed > 0 ? wins / closed * 100 : 0.0
+    gross_prof = strategy.grossprofit
+    gross_loss = strategy.grossloss
+    prof_fact  = gross_loss > 0 ? gross_prof / gross_loss : na
+    net_prof   = strategy.netprofit
+    net_pct    = strategy.initial_capital > 0 ? net_prof / strategy.initial_capital * 100 : 0.0
+    max_dd     = strategy.max_drawdown
+    max_dd_pct = strategy.initial_capital > 0 ? max_dd / strategy.initial_capital * 100 : 0.0
+    max_runup  = strategy.max_runup
+    avg_trade  = closed > 0 ? net_prof / closed : 0.0
+    avg_win    = wins   > 0 ? gross_prof / wins   : 0.0
+    avg_loss   = losses > 0 ? gross_loss / losses : 0.0
+    rr_ratio   = avg_loss > 0 ? avg_win / avg_loss : na
+    expectancy = (win_rate/100) * avg_win - (1 - win_rate/100) * avg_loss
+
+    grade = closed < 10 ? "⚪ POCHI DATI" : prof_fact >= 2.0 and win_rate >= 50 ? "🟢 OTTIMA" : prof_fact >= 1.5 ? "🟡 BUONA" : prof_fact >= 1.0 ? "🟠 OK" : "🔴 PERDENTE"
+    grade_color = closed < 10 ? color.gray : prof_fact >= 2.0 and win_rate >= 50 ? color.lime : prof_fact >= 1.5 ? color.yellow : prof_fact >= 1.0 ? color.orange : color.red
+
+    table.cell(stats, 0, 0,  "📊 BACKTEST",  text_color=color.aqua,   text_size=size.small, bgcolor=color.new(color.black,50))
+    table.cell(stats, 1, 0,  mode,           text_color=color.silver, text_size=size.tiny,  bgcolor=color.new(color.black,50))
+    table.cell(stats, 0, 1,  "Giudizio",     text_color=color.gray,   text_size=size.tiny)
+    table.cell(stats, 1, 1,  grade,          text_color=grade_color,  text_size=size.tiny)
+    table.cell(stats, 0, 2,  "Net Profit",   text_color=color.gray,   text_size=size.tiny)
+    table.cell(stats, 1, 2,  "$" + str.tostring(math.round(net_prof,2)) + " (" + str.tostring(math.round(net_pct,2)) + "%)", text_color=net_prof >= 0 ? color.lime : color.red, text_size=size.tiny)
+    table.cell(stats, 0, 3,  "Trade Totali", text_color=color.gray,   text_size=size.tiny)
+    table.cell(stats, 1, 3,  str.tostring(closed) + " (W:" + str.tostring(wins) + " L:" + str.tostring(losses) + ")", text_color=color.white, text_size=size.tiny)
+    table.cell(stats, 0, 4,  "Win Rate",     text_color=color.gray,   text_size=size.tiny)
+    table.cell(stats, 1, 4,  str.tostring(math.round(win_rate,1)) + "%", text_color=win_rate >= 50 ? color.lime : win_rate >= 40 ? color.yellow : color.red, text_size=size.tiny)
+    table.cell(stats, 0, 5,  "Profit Factor",text_color=color.gray,   text_size=size.tiny)
+    table.cell(stats, 1, 5,  na(prof_fact) ? "─" : str.tostring(math.round(prof_fact,2)), text_color=na(prof_fact) ? color.gray : prof_fact >= 1.5 ? color.lime : prof_fact >= 1.0 ? color.yellow : color.red, text_size=size.tiny)
+    table.cell(stats, 0, 6,  "Max Drawdown", text_color=color.gray,   text_size=size.tiny)
+    table.cell(stats, 1, 6,  "$" + str.tostring(math.round(max_dd,2)) + " (" + str.tostring(math.round(max_dd_pct,2)) + "%)", text_color=max_dd_pct < 10 ? color.lime : max_dd_pct < 20 ? color.yellow : color.red, text_size=size.tiny)
+    table.cell(stats, 0, 7,  "Max Runup",    text_color=color.gray,   text_size=size.tiny)
+    table.cell(stats, 1, 7,  "$" + str.tostring(math.round(max_runup,2)), text_color=color.lime, text_size=size.tiny)
+    table.cell(stats, 0, 8,  "Avg Trade",    text_color=color.gray,   text_size=size.tiny)
+    table.cell(stats, 1, 8,  "$" + str.tostring(math.round(avg_trade,2)), text_color=avg_trade >= 0 ? color.lime : color.red, text_size=size.tiny)
+    table.cell(stats, 0, 9,  "Avg Win/Loss", text_color=color.gray,   text_size=size.tiny)
+    table.cell(stats, 1, 9,  "$" + str.tostring(math.round(avg_win,1)) + " / $" + str.tostring(math.round(avg_loss,1)), text_color=color.silver, text_size=size.tiny)
+    table.cell(stats, 0, 10, "R/R Ratio",    text_color=color.gray,   text_size=size.tiny)
+    table.cell(stats, 1, 10, na(rr_ratio) ? "─" : str.tostring(math.round(rr_ratio,2)) + ":1", text_color=na(rr_ratio) ? color.gray : rr_ratio >= 1.5 ? color.lime : rr_ratio >= 1.0 ? color.yellow : color.red, text_size=size.tiny)
+    table.cell(stats, 0, 11, "Expectancy",   text_color=color.gray,   text_size=size.tiny)
+    table.cell(stats, 1, 11, "$" + str.tostring(math.round(expectancy,2)) + "/trade", text_color=expectancy >= 0 ? color.lime : color.red, text_size=size.tiny)
