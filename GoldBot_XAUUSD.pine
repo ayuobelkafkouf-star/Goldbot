@@ -49,6 +49,7 @@ pause_days   = input.int(3,    "Giorni pausa dopo trigger", group="Protezione", 
 use_atr    = input.bool(true, "Filtro ATR", group="Filtri")
 atr_min    = input.float(1.5, "ATR minimo", group="Filtri")
 cooldown_bars  = input.int(5, "Cooldown barre", group="Filtri")
+enable_max_trades = input.bool(true, "Limita trade giornalieri", group="Filtri", tooltip="Disattiva per togliere il limite trade al giorno (il bot opera libero, ma restano attivi P&L giorno e circuit breaker).")
 max_trades_day = input.int(5, "Max trade giorno", group="Filtri")
 max_loss   = input.float(1.0, "Max perdita % giorno", group="Filtri")
 max_profit = input.float(5.0, "Max profitto % giorno", group="Filtri")
@@ -241,7 +242,7 @@ if strategy.position_size[1] != 0 and strategy.position_size == 0
     trades_today   := trades_today + 1
 
 cooldown_ok = (bar_index - last_close_bar) >= eff_cooldown_bars
-trades_ok   = trades_today < eff_max_trades
+trades_ok   = not enable_max_trades or trades_today < eff_max_trades
 
 var float day_eq = na
 if new_day or na(day_eq)
