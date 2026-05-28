@@ -107,10 +107,10 @@ eff_no_hour_limit = is_quality_24h  // 24h Qualità bypassa il filtro orario
 eff_cooldown_bars = is_aggressive ? 2 : is_quality_24h ? 3 : cooldown_bars
 eff_max_trades    = is_quality_24h ? 8 : is_aggressive ? 10 : max_trades_day
 eff_zone_tol      = is_quality_24h ? zone_tol : is_aggressive ? 0.7 : zone_tol  // 24h Qualità: tolleranza stretta default
-eff_min_score     = is_quality_24h ? 75 : is_extended ? math.max(min_score, 70) : min_score
-// 24h Qualità: spike e body più stretti per filtrare segnali deboli
-eff_spike_mult    = is_quality_24h ? math.max(spike_mult, 0.7) : spike_mult
-eff_body_mult     = is_quality_24h ? math.max(body_mult,  0.5) : body_mult
+eff_min_score     = is_quality_24h ? 65 : is_extended ? math.max(min_score, 70) : min_score
+// 24h Qualità: spike e body leggermente più stretti del default per filtrare segnali deboli (non eccessivi)
+eff_spike_mult    = is_quality_24h ? math.max(spike_mult, 0.5) : spike_mult
+eff_body_mult     = is_quality_24h ? math.max(body_mult,  0.35) : body_mult
 
 // ─── MULTI-ZONE SUPPLY/DEMAND ─────────────────────────────
 // Manteniamo array delle ultime N zone supply e demand. Una zona si invalida
@@ -452,6 +452,19 @@ plotshape(final_buy,  title="Conf BUY",  style=shape.triangleup,   location=loca
 plotshape(bar_index == last_buy_bar,  title="BUY",  style=shape.triangleup,   location=location.belowbar, color=color.lime, size=size.large, text="BUY")
 plotshape(bar_index == last_sell_bar, title="SELL", style=shape.triangledown, location=location.abovebar, color=color.red,  size=size.large, text="SELL")
 bgcolor(not news_ok ? color.new(color.orange,90) : na)
+
+// ─── NEAR-MISS MARKERS ──────────────────────────────────
+// Mostra "x" piccoli sui bar dove il bot È ANDATO VICINO ad entrare ma 1-2 filtri l'hanno bloccato.
+// Aiuta a capire dove sono stati persi i setup e perché.
+show_misses = input.bool(true, "Mostra near-miss (setup quasi entrato)", group="Debug")
+
+// Near-miss SELL: score sopra soglia + zona + trend, ma manca spike/body
+near_miss_sell = show_misses and not final_sell and strategy.position_size == 0 and score_sell >= eff_min_score and h1_bear and m15_bear and price_at_supply and hour_ok and not confirm_sell
+// Near-miss BUY: stesso ragionamento lato long
+near_miss_buy  = show_misses and not final_buy  and strategy.position_size == 0 and score_buy  >= eff_min_score and h1_bull and m15_bull and price_at_demand and hour_ok and not confirm_buy
+
+plotchar(near_miss_sell, title="Near-miss SELL", char="✕", location=location.abovebar, color=color.new(color.orange, 30), size=size.tiny)
+plotchar(near_miss_buy,  title="Near-miss BUY",  char="✕", location=location.belowbar, color=color.new(color.aqua,   30), size=size.tiny)
 
 // ─── ALERT ────────────────────────────────────────────────
 // alertcondition con placeholder {{plot_X}}: funziona sul piano FREE e include SL/TP/Score.
