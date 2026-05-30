@@ -46,6 +46,16 @@ end_hour   = input.int(20, "Ora fine",   group="Filtri")
 use_circuit  = input.bool(true, "Circuit breaker drawdown", group="Protezione")
 dd_threshold = input.float(5.0, "DD max % dal peak", group="Protezione", minval=1.0, maxval=20.0, step=0.5)
 pause_days   = input.int(3,    "Giorni pausa dopo trigger", group="Protezione", minval=1, maxval=14)
+
+// ─── ANTI-WHIPSAW (3 protezioni aggiuntive) ─────
+use_adx          = input.bool(true, "Filtro ADX (entra solo in trend forte)", group="Anti-Whipsaw", tooltip="ADX misura la forza del trend. Sotto soglia il trend è debole/incerto e il bot non entra.")
+adx_threshold    = input.float(25.0, "Soglia ADX minima", group="Anti-Whipsaw", minval=10.0, maxval=50.0, step=1.0)
+use_smart_cd     = input.bool(true, "Cooldown esteso dopo stop loss", group="Anti-Whipsaw", tooltip="Dopo uno stop loss, aspetta più barre prima di rientrare. Evita doppi stop nelle inversioni-trappola.")
+post_sl_cooldown = input.int(10, "Barre cooldown dopo SL", group="Anti-Whipsaw", minval=1, maxval=50)
+use_adaptive_sl  = input.bool(true, "Stop loss adattivo alla volatilità", group="Anti-Whipsaw", tooltip="In giornate di alta volatilità lo SL si allarga automaticamente per evitare stop hunting.")
+vol_high_mult    = input.float(1.5, "Soglia alta volatilità (x ATR medio)", group="Anti-Whipsaw", minval=1.1, maxval=3.0, step=0.1)
+sl_high_vol_mult = input.float(1.75, "Moltiplicatore SL in alta volatilità", group="Anti-Whipsaw", minval=1.0, maxval=3.0, step=0.25)
+
 use_atr    = input.bool(true, "Filtro ATR", group="Filtri")
 atr_min    = input.float(1.5, "ATR minimo", group="Filtri")
 cooldown_bars  = input.int(5, "Cooldown barre", group="Filtri")
@@ -94,6 +104,16 @@ h1_bull  = h1_ef > h1_es
 h1_bear  = h1_ef < h1_es
 m15_bull = m15_ef > m15_es
 m15_bear = m15_ef < m15_es
+
+// ─── ADX (FORZA DEL TREND) ────────────────────────────────
+// ADX alto = trend forte. ADX basso = mercato laterale/incerto (whipsaw zone).
+[di_plus_calc, di_minus_calc, adx_native] = ta.dmi(14, 14)
+adx_val = adx_native
+
+// ─── VOLATILITÀ (per SL adattivo) ─────────────────────────
+atr_avg_long = ta.sma(atr_val, 50)
+is_high_vol  = not na(atr_avg_long) and atr_avg_long > 0 and atr_val > atr_avg_long * vol_high_mult
+eff_sl_atr_mult = use_adaptive_sl and is_high_vol ? sl_atr_mult * sl_high_vol_mult : sl_atr_mult
 
 // ─── MODALITÀ EFFETTIVA ───────────────────────────────────
 // 4 modalità: Conservativo (13-17), Sessione Estesa (8-20, score 70), Aggressivo (8-20, cd 2), 24h Qualità (24h, score 75, spike+body stretti).
@@ -213,6 +233,7 @@ hours_ok    = h_now >= start_hour and h_now < end_hour
 // Conservativo → overlap; Estesa/Aggressiva → fascia 8-20 forzata; altrimenti rispetta use_hours.
 hour_ok     = eff_no_hour_limit ? true : eff_use_session ? session_ok : eff_force_hours ? hours_ok : (not use_hours or hours_ok)
 atr_ok      = not use_atr or atr_val >= atr_min
+adx_ok      = not use_adx or adx_val >= adx_threshold
 // Bypass RSI quando trend H1 + M15 + zona sono tutti allineati: in trend forti RSI resta
 // oversold/overbought e bloccherebbe le continuation. Se mancano allineamenti, RSI filtra.
 strong_sell_alignment = h1_bear and m15_bear and price_at_supply
@@ -227,9 +248,10 @@ in_news(_act, _h, _m) => _act and current_mins >= (_h*60+_m - news_before) and c
 in_news_any = in_news(news1_active, news1_hour, news1_min) or in_news(news2_active, news2_hour, news2_min) or in_news(news3_active, news3_hour, news3_min)
 news_ok     = not use_news or not in_news_any
 
-var int last_close_bar = 0
-var int trades_today   = 0
-var int last_trade_day = -1
+var int  last_close_bar    = 0
+var int  trades_today      = 0
+var int  last_trade_day    = -1
+var bool last_trade_was_sl = false  // true se l'ultimo trade chiuso era in perdita (SL hit)
 current_day = dayofmonth(time, "Europe/Rome")
 new_day = ta.change(current_day) != 0
 
@@ -240,8 +262,12 @@ if new_day
 if strategy.position_size[1] != 0 and strategy.position_size == 0
     last_close_bar := bar_index
     trades_today   := trades_today + 1
+    if strategy.closedtrades > 0
+        last_trade_was_sl := strategy.closedtrades.profit(strategy.closedtrades - 1) < 0
 
-cooldown_ok = (bar_index - last_close_bar) >= eff_cooldown_bars
+// Cooldown smart: dopo uno SL aspetta più barre (post_sl_cooldown), altrimenti cooldown normale.
+extended_cd = use_smart_cd and last_trade_was_sl ? math.max(eff_cooldown_bars, post_sl_cooldown) : eff_cooldown_bars
+cooldown_ok = (bar_index - last_close_bar) >= extended_cd
 trades_ok   = not enable_max_trades or trades_today < eff_max_trades
 
 var float day_eq = na
@@ -290,9 +316,9 @@ score_ok_sell = score_sell >= eff_min_score
 score_ok_buy  = score_buy  >= eff_min_score
 
 // ─── SEGNALI ──────────────────────────────────────────────
-final_sell = confirm_sell and price_at_supply and h1_bear and m15_bear and rsi_ok_sell and hour_ok and atr_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_sell and strategy.position_size == 0
+final_sell = confirm_sell and price_at_supply and h1_bear and m15_bear and rsi_ok_sell and hour_ok and atr_ok and adx_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_sell and strategy.position_size == 0
 
-final_buy  = confirm_buy  and price_at_demand and h1_bull and m15_bull and rsi_ok_buy  and hour_ok and atr_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_buy  and strategy.position_size == 0
+final_buy  = confirm_buy  and price_at_demand and h1_bull and m15_bull and rsi_ok_buy  and hour_ok and atr_ok and adx_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_buy  and strategy.position_size == 0
 
 // ─── POSITION SIZING DINAMICO ─────────────────────────────
 // Calcola la qty in base al rischio % e alla distanza dello SL.
@@ -317,11 +343,12 @@ var box sl_box  = na
 
 if final_buy
     last_buy_bar := bar_index
-    sl_buy   := m15_low - atr_val * sl_atr_mult
+    sl_buy   := m15_low - atr_val * eff_sl_atr_mult
     tp1_buy  := m15_struct_high
     tp2_buy  := h1_struct_high
     entry_px := close
     be_active := false
+    last_trade_was_sl := false
     qty      = f_qty(close - sl_buy)
     strategy.entry("BUY", strategy.long, qty=qty)
     strategy.exit("BUY_EXIT", from_entry="BUY", stop=sl_buy, limit=tp2_buy)
@@ -339,11 +366,12 @@ if final_buy
 
 if final_sell
     last_sell_bar := bar_index
-    sl_sell  := m15_high + atr_val * sl_atr_mult
+    sl_sell  := m15_high + atr_val * eff_sl_atr_mult
     tp1_sell := m15_struct_low
     tp2_sell := h1_struct_low
     entry_px := close
     be_active := false
+    last_trade_was_sl := false
     qty      = f_qty(sl_sell - close)
     strategy.entry("SELL", strategy.short, qty=qty)
     strategy.exit("SELL_EXIT", from_entry="SELL", stop=sl_sell, limit=tp2_sell)
@@ -419,11 +447,13 @@ if barstate.islast and show_debug
     common = ""
     common := common + (hour_ok     ? "✅" : "❌") + " Orario\n"
     common := common + (atr_ok      ? "✅" : "❌") + " ATR (" + str.tostring(math.round(atr_val,2)) + ")\n"
+    common := common + (adx_ok      ? "✅" : "❌") + " ADX " + str.tostring(math.round(adx_val,1)) + "/" + str.tostring(adx_threshold) + "\n"
     common := common + (news_ok     ? "✅" : "❌") + " Notizie\n"
-    common := common + (cooldown_ok ? "✅" : "❌") + " Cooldown (" + str.tostring(bar_index - last_close_bar) + "/" + str.tostring(eff_cooldown_bars) + ")\n"
+    common := common + (cooldown_ok ? "✅" : "❌") + " Cooldown (" + str.tostring(bar_index - last_close_bar) + "/" + str.tostring(extended_cd) + ")" + (last_trade_was_sl ? " 🛑post-SL" : "") + "\n"
     common := common + (trades_ok   ? "✅" : "❌") + " Trade " + str.tostring(trades_today) + "/" + str.tostring(eff_max_trades) + "\n"
     common := common + (day_ok      ? "✅" : "❌") + " P&L giorno (" + str.tostring(math.round(day_pct,2)) + "%)\n"
     common := common + (circuit_ok  ? "✅" : "❌") + " Circuit breaker\n"
+    common := common + (is_high_vol ? "⚡" : "🟢") + " Volatilità " + (is_high_vol ? "ALTA (SL " + str.tostring(eff_sl_atr_mult, "#.##") + " ATR)" : "normale") + "\n"
     flat = strategy.position_size == 0
     pos_status = flat ? "✅ Flat (può entrare)" : "❌ Posizione aperta"
     title = final_buy ? "🟢 ENTRATA BUY!" : final_sell ? "🔴 ENTRATA SELL!" : "⏸️ NESSUNA ENTRATA"
@@ -437,10 +467,10 @@ plot(m15_ef, "EMA21 M15", color=color.new(color.aqua,   40), linewidth=1, displa
 plot(m15_es, "EMA55 M15", color=color.new(color.orange, 40), linewidth=1, display=display.none)
 
 // Plot invisibili per iniettare SL/TP/Score nei placeholder {{plot_X}} delle alertcondition (piano FREE).
-plot_sl_buy_v   = final_buy  ? m15_low  - atr_val * sl_atr_mult : na
+plot_sl_buy_v   = final_buy  ? m15_low  - atr_val * eff_sl_atr_mult : na
 plot_tp1_buy_v  = final_buy  ? m15_struct_high : na
 plot_tp2_buy_v  = final_buy  ? h1_struct_high  : na
-plot_sl_sell_v  = final_sell ? m15_high + atr_val * sl_atr_mult : na
+plot_sl_sell_v  = final_sell ? m15_high + atr_val * eff_sl_atr_mult : na
 plot_tp1_sell_v = final_sell ? m15_struct_low  : na
 plot_tp2_sell_v = final_sell ? h1_struct_low   : na
 plot(plot_sl_buy_v,   "SL Buy",     display=display.none)  // {{plot_4}}
@@ -463,10 +493,10 @@ bgcolor(not news_ok ? color.new(color.orange,90) : na)
 // Aiuta a capire dove sono stati persi i setup e perché.
 show_misses = input.bool(true, "Mostra near-miss (setup quasi entrato)", group="Debug")
 
-// Near-miss SELL: score sopra soglia + zona + trend, ma manca spike/body
-near_miss_sell = show_misses and not final_sell and strategy.position_size == 0 and score_sell >= eff_min_score and h1_bear and m15_bear and price_at_supply and hour_ok and not confirm_sell
+// Near-miss SELL: score sopra soglia + zona + trend + adx, ma manca spike/body
+near_miss_sell = show_misses and not final_sell and strategy.position_size == 0 and score_sell >= eff_min_score and h1_bear and m15_bear and price_at_supply and hour_ok and adx_ok and not confirm_sell
 // Near-miss BUY: stesso ragionamento lato long
-near_miss_buy  = show_misses and not final_buy  and strategy.position_size == 0 and score_buy  >= eff_min_score and h1_bull and m15_bull and price_at_demand and hour_ok and not confirm_buy
+near_miss_buy  = show_misses and not final_buy  and strategy.position_size == 0 and score_buy  >= eff_min_score and h1_bull and m15_bull and price_at_demand and hour_ok and adx_ok and not confirm_buy
 
 plotchar(near_miss_sell, title="Near-miss SELL", char="✕", location=location.abovebar, color=color.new(color.orange, 30), size=size.tiny)
 plotchar(near_miss_buy,  title="Near-miss BUY",  char="✕", location=location.belowbar, color=color.new(color.aqua,   30), size=size.tiny)
@@ -494,8 +524,8 @@ if barstate.islast
     table.cell(t, 1, 1,  h1_bull ? "RIALZISTA ▲" : "RIBASSISTA ▼", text_color=h1_bull ? color.lime : color.red, text_size=size.tiny)
     table.cell(t, 0, 2,  "M15 Trend",     text_color=color.gray, text_size=size.tiny)
     table.cell(t, 1, 2,  m15_bull ? "BUY ZONE" : "SELL ZONE", text_color=m15_bull ? color.lime : color.red, text_size=size.tiny)
-    table.cell(t, 0, 3,  "RSI M15",       text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 3,  str.tostring(math.round(m15_rsi,1)), text_color=m15_rsi > rsi_ob ? color.red : m15_rsi < rsi_os ? color.lime : color.white, text_size=size.tiny)
+    table.cell(t, 0, 3,  "RSI / ADX",     text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 3,  str.tostring(math.round(m15_rsi,1)) + " / " + str.tostring(math.round(adx_val,1)) + (is_high_vol ? " ⚡" : ""), text_color=adx_ok ? color.lime : color.orange, text_size=size.tiny)
     table.cell(t, 0, 4,  "Supply Zones",  text_color=color.gray, text_size=size.tiny)
     table.cell(t, 1, 4,  supply_display,  text_color=sup_count > 0 ? color.red : color.gray, text_size=size.tiny)
     table.cell(t, 0, 5,  "Demand Zones",  text_color=color.gray, text_size=size.tiny)
