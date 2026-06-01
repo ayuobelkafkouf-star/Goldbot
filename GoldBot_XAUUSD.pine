@@ -150,9 +150,9 @@ var int   bear_ob_bar = 0
 var box   bear_ob_box = na
 
 f_find_last_bear_candle() =>
-    found_idx = -1
-    found_high = na
-    found_low  = na
+    int   found_idx  = -1
+    float found_high = na
+    float found_low  = na
     for i = 1 to 30
         if close[i] < open[i]
             found_idx := i
@@ -162,9 +162,9 @@ f_find_last_bear_candle() =>
     [found_idx, found_high, found_low]
 
 f_find_last_bull_candle() =>
-    found_idx = -1
-    found_high = na
-    found_low  = na
+    int   found_idx  = -1
+    float found_high = na
+    float found_low  = na
     for i = 1 to 30
         if close[i] > open[i]
             found_idx := i
