@@ -56,6 +56,17 @@ use_adaptive_sl  = input.bool(true, "Stop loss adattivo alla volatilità", group
 vol_high_mult    = input.float(1.2, "Soglia alta volatilità (x ATR medio)", group="Anti-Whipsaw", minval=1.1, maxval=3.0, step=0.1)
 sl_high_vol_mult = input.float(2.0, "Moltiplicatore SL in alta volatilità", group="Anti-Whipsaw", minval=1.0, maxval=3.0, step=0.25)
 
+// ─── SMC (Smart Money Concepts) ─────────────────────────
+// Aggiunge pattern istituzionali come trigger di entry alternativi a spike+body.
+// FVG (Fair Value Gap) = gap di prezzo non riempito che il mercato tende a richiudere.
+// Liquidity Sweep = caccia agli stop loss prima di un'inversione.
+use_smc        = input.bool(true,  "Abilita SMC (FVG + Sweep)", group="SMC", tooltip="Sperimentale. Aggiunge trigger SMC accanto a spike+body. Disattiva se vedi troppi falsi segnali.")
+smc_use_fvg    = input.bool(true,  "Trigger: FVG retest", group="SMC", tooltip="Entra quando il prezzo torna a testare un Fair Value Gap recente non riempito (nella direzione del trend).")
+smc_use_sweep  = input.bool(true,  "Trigger: Liquidity Sweep", group="SMC", tooltip="Entra dopo che il prezzo caccia gli stop (wick oltre swing high/low) e chiude in direzione opposta.")
+smc_lookback   = input.int(15,    "Lookback swing (per Sweep)", group="SMC", minval=5,  maxval=50)
+smc_fvg_age    = input.int(30,    "Età max FVG (barre)",        group="SMC", minval=5,  maxval=100)
+smc_show_zones = input.bool(true,  "Mostra FVG sul grafico",     group="SMC")
+
 use_atr    = input.bool(true, "Filtro ATR", group="Filtri")
 atr_min    = input.float(1.5, "ATR minimo", group="Filtri")
 cooldown_bars  = input.int(5, "Cooldown barre", group="Filtri")
@@ -226,6 +237,56 @@ body_buy  = m15_close - m15_open
 confirm_sell = spike_up   and m15_close < m15_open and body_sell >= m15_atr * eff_body_mult
 confirm_buy  = spike_down and m15_close > m15_open and body_buy  >= m15_atr * eff_body_mult
 
+// ─── SMC: FVG DETECTION (3-bar pattern) ─────────────────
+// Bullish FVG: low corrente > high di 2 candele fa (gap up nel mezzo)
+// Bearish FVG: high corrente < low di 2 candele fa (gap down nel mezzo)
+m15_high_lag2 = f_sec("15", high[2])
+m15_low_lag2  = f_sec("15", low[2])
+bull_fvg_form = m15_low  > m15_high_lag2
+bear_fvg_form = m15_high < m15_low_lag2
+
+var float bull_fvg_top = na
+var float bull_fvg_bot = na
+var int   bull_fvg_bar = 0
+var box   bull_fvg_box = na
+var float bear_fvg_top = na
+var float bear_fvg_bot = na
+var int   bear_fvg_bar = 0
+var box   bear_fvg_box = na
+
+if bull_fvg_form
+    box.delete(bull_fvg_box)
+    bull_fvg_top := m15_low
+    bull_fvg_bot := m15_high_lag2
+    bull_fvg_bar := bar_index
+    if use_smc and smc_show_zones
+        bull_fvg_box := box.new(bar_index, bull_fvg_top, bar_index + smc_fvg_age, bull_fvg_bot, bgcolor=color.new(color.aqua, 80), border_color=color.new(color.aqua, 40), text="FVG↑", text_size=size.tiny, text_color=color.aqua)
+
+if bear_fvg_form
+    box.delete(bear_fvg_box)
+    bear_fvg_top := m15_low_lag2
+    bear_fvg_bot := m15_high
+    bear_fvg_bar := bar_index
+    if use_smc and smc_show_zones
+        bear_fvg_box := box.new(bar_index, bear_fvg_top, bar_index + smc_fvg_age, bear_fvg_bot, bgcolor=color.new(color.fuchsia, 80), border_color=color.new(color.fuchsia, 40), text="FVG↓", text_size=size.tiny, text_color=color.fuchsia)
+
+bull_fvg_alive  = not na(bull_fvg_top) and (bar_index - bull_fvg_bar) <= smc_fvg_age
+bear_fvg_alive  = not na(bear_fvg_top) and (bar_index - bear_fvg_bar) <= smc_fvg_age
+bull_fvg_retest = bull_fvg_alive and low  <= bull_fvg_top and low  >= bull_fvg_bot and close > open
+bear_fvg_retest = bear_fvg_alive and high >= bear_fvg_bot and high <= bear_fvg_top and close < open
+
+// ─── SMC: LIQUIDITY SWEEP ───────────────────────────────
+// Bear sweep: wick oltre swing high recente, ma chiusura sotto = inversione ribassista
+// Bull sweep: wick sotto swing low recente, ma chiusura sopra = inversione rialzista
+swing_high_smc = ta.highest(high[1], smc_lookback)
+swing_low_smc  = ta.lowest (low [1], smc_lookback)
+bear_sweep = high > swing_high_smc and close < swing_high_smc and close < open
+bull_sweep = low  < swing_low_smc  and close > swing_low_smc  and close > open
+
+// SMC pattern aggregato: vero se almeno un trigger SMC abilitato è attivo
+smc_buy_pattern  = use_smc and ((smc_use_fvg and bull_fvg_retest) or (smc_use_sweep and bull_sweep))
+smc_sell_pattern = use_smc and ((smc_use_fvg and bear_fvg_retest) or (smc_use_sweep and bear_sweep))
+
 // ─── FILTRI ───────────────────────────────────────────────
 h_now       = hour(time, "Europe/Rome")
 session_ok  = h_now >= session_start and h_now < session_end
@@ -316,9 +377,17 @@ score_ok_sell = score_sell >= eff_min_score
 score_ok_buy  = score_buy  >= eff_min_score
 
 // ─── SEGNALI ──────────────────────────────────────────────
-final_sell = confirm_sell and price_at_supply and h1_bear and m15_bear and rsi_ok_sell and hour_ok and atr_ok and adx_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_sell and strategy.position_size == 0
+// Entry trigger: spike+body classico OPPURE pattern SMC (se abilitato)
+entry_trigger_buy  = confirm_buy  or smc_buy_pattern
+entry_trigger_sell = confirm_sell or smc_sell_pattern
 
-final_buy  = confirm_buy  and price_at_demand and h1_bull and m15_bull and rsi_ok_buy  and hour_ok and atr_ok and adx_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_buy  and strategy.position_size == 0
+final_sell = entry_trigger_sell and price_at_supply and h1_bear and m15_bear and rsi_ok_sell and hour_ok and atr_ok and adx_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_sell and strategy.position_size == 0
+
+final_buy  = entry_trigger_buy  and price_at_demand and h1_bull and m15_bull and rsi_ok_buy  and hour_ok and atr_ok and adx_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_buy  and strategy.position_size == 0
+
+// Etichetta per capire quale trigger ha attivato l'entry
+buy_trigger_type  = smc_buy_pattern  ? (bull_sweep ? "SMC-Sweep" : "SMC-FVG") : "Spike+Body"
+sell_trigger_type = smc_sell_pattern ? (bear_sweep ? "SMC-Sweep" : "SMC-FVG") : "Spike+Body"
 
 // ─── POSITION SIZING DINAMICO ─────────────────────────────
 // Calcola la qty in base al rischio % e alla distanza dello SL.
@@ -357,12 +426,13 @@ if final_buy
     tp1_box := box.new(bar_index, close,   bar_index+50, tp1_buy, bgcolor=color.new(color.green,70), border_color=color.new(color.green,40))
     sl_box  := box.new(bar_index, sl_buy,  bar_index+50, close,   bgcolor=color.new(color.red,70),   border_color=color.new(color.red,30))
     alert("🟢 GoldBot BUY XAUUSD" +
-          "\nEntry: "  + str.tostring(close,   "#.##") +
-          "\nSL: "     + str.tostring(sl_buy,  "#.##") +
-          "\nTP1: "    + str.tostring(tp1_buy, "#.##") +
-          "\nTP2: "    + str.tostring(tp2_buy, "#.##") +
-          "\nScore: "  + str.tostring(score_buy) +
-          "\nMode: "   + mode, alert.freq_once_per_bar_close)
+          "\nEntry: "   + str.tostring(close,   "#.##") +
+          "\nSL: "      + str.tostring(sl_buy,  "#.##") +
+          "\nTP1: "     + str.tostring(tp1_buy, "#.##") +
+          "\nTP2: "     + str.tostring(tp2_buy, "#.##") +
+          "\nScore: "   + str.tostring(score_buy) +
+          "\nTrigger: " + buy_trigger_type +
+          "\nMode: "    + mode, alert.freq_once_per_bar_close)
 
 if final_sell
     last_sell_bar := bar_index
@@ -380,12 +450,13 @@ if final_sell
     tp1_box := box.new(bar_index, tp1_sell, bar_index+50, close,    bgcolor=color.new(color.green,70), border_color=color.new(color.green,40))
     sl_box  := box.new(bar_index, close,    bar_index+50, sl_sell,  bgcolor=color.new(color.red,70),   border_color=color.new(color.red,30))
     alert("🔴 GoldBot SELL XAUUSD" +
-          "\nEntry: "  + str.tostring(close,    "#.##") +
-          "\nSL: "     + str.tostring(sl_sell,  "#.##") +
-          "\nTP1: "    + str.tostring(tp1_sell, "#.##") +
-          "\nTP2: "    + str.tostring(tp2_sell, "#.##") +
-          "\nScore: "  + str.tostring(score_sell) +
-          "\nMode: "   + mode, alert.freq_once_per_bar_close)
+          "\nEntry: "   + str.tostring(close,    "#.##") +
+          "\nSL: "      + str.tostring(sl_sell,  "#.##") +
+          "\nTP1: "     + str.tostring(tp1_sell, "#.##") +
+          "\nTP2: "     + str.tostring(tp2_sell, "#.##") +
+          "\nScore: "   + str.tostring(score_sell) +
+          "\nTrigger: " + sell_trigger_type +
+          "\nMode: "    + mode, alert.freq_once_per_bar_close)
 
 // ─── PARZIALE A TP1 + BREAK-EVEN + TRAILING ───────────────
 // A TP1: chiusura parziale, SL a BE, poi (se use_trail) trailing ATR.
@@ -454,6 +525,11 @@ if barstate.islast and show_debug
     common := common + (day_ok      ? "✅" : "❌") + " P&L giorno (" + str.tostring(math.round(day_pct,2)) + "%)\n"
     common := common + (circuit_ok  ? "✅" : "❌") + " Circuit breaker\n"
     common := common + (is_high_vol ? "⚡" : "🟢") + " Volatilità " + (is_high_vol ? "ALTA (SL " + str.tostring(eff_sl_atr_mult, "#.##") + " ATR)" : "normale") + "\n"
+    if use_smc
+        smc_buy_txt  = smc_buy_pattern  ? (bull_sweep ? "🔼 Bull Sweep" : "🔼 FVG retest") : "─"
+        smc_sell_txt = smc_sell_pattern ? (bear_sweep ? "🔽 Bear Sweep" : "🔽 FVG retest") : "─"
+        common := common + "🧠 SMC BUY: "  + smc_buy_txt  + "\n"
+        common := common + "🧠 SMC SELL: " + smc_sell_txt + "\n"
     flat = strategy.position_size == 0
     pos_status = flat ? "✅ Flat (può entrare)" : "❌ Posizione aperta"
     title = final_buy ? "🟢 ENTRATA BUY!" : final_sell ? "🔴 ENTRATA SELL!" : "⏸️ NESSUNA ENTRATA"
@@ -486,6 +562,8 @@ plotshape(final_sell, title="Conf SELL", style=shape.triangledown, location=loca
 plotshape(final_buy,  title="Conf BUY",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.yellow,0), size=size.small, text="CB")
 plotshape(bar_index == last_buy_bar,  title="BUY",  style=shape.triangleup,   location=location.belowbar, color=color.lime, size=size.large, text="BUY")
 plotshape(bar_index == last_sell_bar, title="SELL", style=shape.triangledown, location=location.abovebar, color=color.red,  size=size.large, text="SELL")
+plotshape(use_smc and bull_sweep, title="Bull Sweep", style=shape.diamond, location=location.belowbar, color=color.aqua,    size=size.tiny, text="SW")
+plotshape(use_smc and bear_sweep, title="Bear Sweep", style=shape.diamond, location=location.abovebar, color=color.fuchsia, size=size.tiny, text="SW")
 bgcolor(not news_ok ? color.new(color.orange,90) : na)
 
 // ─── NEAR-MISS MARKERS ──────────────────────────────────
