@@ -257,7 +257,7 @@ var bool recent_bull_sweep = false
 var bool recent_bear_sweep = false
 var int  bull_sweep_bar = 0
 var int  bear_sweep_bar = 0
-sweep_validity = 5
+sweep_validity = 10
 if bull_sweep
     recent_bull_sweep := true
     bull_sweep_bar := bar_index
