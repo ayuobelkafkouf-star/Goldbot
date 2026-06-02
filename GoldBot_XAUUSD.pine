@@ -27,7 +27,7 @@ struct_max     = input.int(10, "Max swing tracciati per lato", group="Struttura"
 ob_age_max     = input.int(50, "Età max Order Block (barre)", group="SMC", minval=10, maxval=200)
 fvg_age_max    = input.int(40, "Età max FVG (barre)",         group="SMC", minval=5,  maxval=100)
 sweep_lookback = input.int(15, "Lookback Liquidity Sweep",    group="SMC", minval=5,  maxval=50)
-require_sweep  = input.bool(true, "Richiedi Sweep prima dell'entry", group="SMC", tooltip="Se ON, entra solo se c'è stato un liquidity sweep recente (cattura solo reversal puliti).")
+require_sweep  = input.bool(false, "Richiedi Sweep prima dell'entry", group="SMC", tooltip="Se ON, entra solo se c'è stato un liquidity sweep recente (cattura solo reversal puliti).")
 
 // Rischio
 risk_pct       = input.float(0.5, "Rischio % per trade",   group="Rischio", minval=0.1, maxval=3.0, step=0.1)
