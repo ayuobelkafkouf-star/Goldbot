@@ -71,6 +71,8 @@ show_struct    = input.bool(true,  "Mostra struttura (HH/HL/LH/LL)", group="Visu
 show_ob        = input.bool(true,  "Mostra Order Block", group="Visuale")
 show_fvg       = input.bool(true,  "Mostra FVG", group="Visuale")
 show_sweep     = input.bool(true,  "Mostra Liquidity Sweep", group="Visuale")
+show_bos       = input.bool(false, "Mostra BOS", group="Visuale")
+show_choch     = input.bool(true,  "Mostra CHoCH", group="Visuale")
 show_debug     = input.bool(true,  "Mostra debug filtri", group="Visuale")
 
 // ─── HTF DATA (no repaint) ────────────────────────────────
@@ -442,9 +444,9 @@ if show_struct and not na(ph_val)
 if show_struct and not na(pl_val)
     label.new(bar_index - pivot_len, pl_val - atr_val*0.3, structure == -1 ? "LL" : "HL", style=label.style_label_up, color=color.new(structure == -1 ? color.red : color.aqua, 20), textcolor=color.white, size=size.tiny)
 
-if bos_event
+if show_bos and bos_event
     label.new(bar_index, close, "BOS", style=label.style_label_left, color=color.new(color.yellow, 20), textcolor=color.black, size=size.small)
-if choch_event
+if show_choch and choch_event
     label.new(bar_index, close, "CHoCH", style=label.style_label_left, color=color.new(color.fuchsia, 10), textcolor=color.white, size=size.small)
 
 plotshape(show_sweep and bull_sweep, title="Bull Sweep", style=shape.diamond, location=location.belowbar, color=color.aqua,    size=size.tiny, text="SW")
