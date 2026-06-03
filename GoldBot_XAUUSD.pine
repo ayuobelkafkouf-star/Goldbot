@@ -42,7 +42,7 @@ use_trail      = input.bool(true, "Trailing dopo TP1",      group="Rischio")
 trail_mult     = input.float(1.5, "Trailing ATR mult",      group="Rischio", minval=0.5, maxval=5.0, step=0.1)
 
 // Filtri operativi
-use_session    = input.bool(true,  "Filtro sessione (Londra/NY 8-20 Roma)", group="Filtri")
+use_session    = input.bool(false, "Filtro sessione (Londra/NY 8-20 Roma)", group="Filtri")
 sess_start     = input.int(8,  "Sessione start (Roma)", group="Filtri", minval=0, maxval=23)
 sess_end       = input.int(20, "Sessione end (Roma)",   group="Filtri", minval=0, maxval=23)
 use_atr_filt   = input.bool(true,  "Filtro ATR minimo", group="Filtri")
