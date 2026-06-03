@@ -3,7 +3,8 @@ strategy("GoldBot SMC v6", shorttitle="GoldBot SMC", overlay=true,
   default_qty_type=strategy.percent_of_equity, default_qty_value=10,
   commission_type=strategy.commission.cash_per_contract, commission_value=0.35,
   slippage=5, margin_long=100, margin_short=100,
-  calc_on_every_tick=false, process_orders_on_close=true)
+  calc_on_every_tick=false, process_orders_on_close=true,
+  pyramiding=10)
 
 // ═══════════════════════════════════════════════════════════
 // GOLDBOT SMC — Smart Money Concepts pure
@@ -31,6 +32,7 @@ require_sweep  = input.bool(true, "Richiedi Sweep prima dell'entry", group="SMC"
 
 // Rischio
 risk_pct       = input.float(0.5, "Rischio % per trade",   group="Rischio", minval=0.1, maxval=3.0, step=0.1)
+max_concurrent = input.int(5,    "Max trade simultanei",   group="Rischio", minval=1, maxval=10, tooltip="Quanti trade può tenere aperti il bot contemporaneamente. Più alto = più libertà ma più rischio (ogni trade aggiunge il suo rischio % al totale).")
 sl_buffer_atr  = input.float(0.5, "SL buffer oltre OB (ATR)", group="Rischio", minval=0.1, maxval=2.0, step=0.1)
 tp1_pct        = input.float(50,  "% chiusura TP1",         group="Rischio", minval=10,  maxval=90)
 rr_tp2         = input.float(4.0, "R:R per TP2",            group="Rischio", minval=1.0, maxval=10.0, step=0.5)
@@ -342,8 +344,8 @@ entry_sell_ok = bear_retest and (is_conservativo ? recent_bear_choch : true)
 sweep_buy_ok  = not require_sweep or recent_bull_sweep
 sweep_sell_ok = not require_sweep or recent_bear_sweep
 
-final_buy  = entry_buy_ok  and sweep_buy_ok  and sess_ok and atr_ok and news_ok and cd_ok and trades_ok and day_ok and circuit_ok and strategy.position_size == 0
-final_sell = entry_sell_ok and sweep_sell_ok and sess_ok and atr_ok and news_ok and cd_ok and trades_ok and day_ok and circuit_ok and strategy.position_size == 0
+final_buy  = entry_buy_ok  and sweep_buy_ok  and sess_ok and atr_ok and news_ok and cd_ok and trades_ok and day_ok and circuit_ok and strategy.opentrades < max_concurrent
+final_sell = entry_sell_ok and sweep_sell_ok and sess_ok and atr_ok and news_ok and cd_ok and trades_ok and day_ok and circuit_ok and strategy.opentrades < max_concurrent
 
 // ─── POSITION SIZING + SL/TP ──────────────────────────────
 f_qty(_sl_dist) =>
