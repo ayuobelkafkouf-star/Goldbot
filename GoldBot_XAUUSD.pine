@@ -316,9 +316,11 @@ score_ok_sell = score_sell >= eff_min_score
 score_ok_buy  = score_buy  >= eff_min_score
 
 // ─── SEGNALI ──────────────────────────────────────────────
-final_sell = confirm_sell and price_at_supply and h1_bear and m15_bear and rsi_ok_sell and hour_ok and atr_ok and adx_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_sell and strategy.position_size == 0
+// H1 trend filter rimosso: il bot usa solo M15 per la direzione.
+// H1 resta nello score system come bonus ma non blocca più l'entry.
+final_sell = confirm_sell and price_at_supply and m15_bear and rsi_ok_sell and hour_ok and atr_ok and adx_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_sell and strategy.position_size == 0
 
-final_buy  = confirm_buy  and price_at_demand and h1_bull and m15_bull and rsi_ok_buy  and hour_ok and atr_ok and adx_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_buy  and strategy.position_size == 0
+final_buy  = confirm_buy  and price_at_demand and m15_bull and rsi_ok_buy  and hour_ok and atr_ok and adx_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_buy  and strategy.position_size == 0
 
 // ─── POSITION SIZING DINAMICO ─────────────────────────────
 // Calcola la qty in base al rischio % e alla distanza dello SL.
@@ -494,9 +496,9 @@ bgcolor(not news_ok ? color.new(color.orange,90) : na)
 show_misses = input.bool(true, "Mostra near-miss (setup quasi entrato)", group="Debug")
 
 // Near-miss SELL: score sopra soglia + zona + trend + adx, ma manca spike/body
-near_miss_sell = show_misses and not final_sell and strategy.position_size == 0 and score_sell >= eff_min_score and h1_bear and m15_bear and price_at_supply and hour_ok and adx_ok and not confirm_sell
+near_miss_sell = show_misses and not final_sell and strategy.position_size == 0 and score_sell >= eff_min_score and m15_bear and price_at_supply and hour_ok and adx_ok and not confirm_sell
 // Near-miss BUY: stesso ragionamento lato long
-near_miss_buy  = show_misses and not final_buy  and strategy.position_size == 0 and score_buy  >= eff_min_score and h1_bull and m15_bull and price_at_demand and hour_ok and adx_ok and not confirm_buy
+near_miss_buy  = show_misses and not final_buy  and strategy.position_size == 0 and score_buy  >= eff_min_score and m15_bull and price_at_demand and hour_ok and adx_ok and not confirm_buy
 
 plotchar(near_miss_sell, title="Near-miss SELL", char="✕", location=location.abovebar, color=color.new(color.orange, 30), size=size.tiny)
 plotchar(near_miss_buy,  title="Near-miss BUY",  char="✕", location=location.belowbar, color=color.new(color.aqua,   30), size=size.tiny)
