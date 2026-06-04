@@ -3,8 +3,7 @@ strategy("GoldBot XAUUSD v5.2", shorttitle="GoldBot v5.2", overlay=true,
   default_qty_type=strategy.percent_of_equity, default_qty_value=10,
   commission_type=strategy.commission.cash_per_contract, commission_value=0.35,
   slippage=5, margin_long=100, margin_short=100,
-  calc_on_every_tick=false, process_orders_on_close=true,
-  pyramiding=20)
+  calc_on_every_tick=false, process_orders_on_close=true)
 
 // ─── INPUTS ───────────────────────────────────────────────
 mode = input.string("Conservativo", "Modalità operativa",
@@ -31,7 +30,6 @@ spike_mult  = input.float(0.5, "Spike minimo ATR", group="Spike", minval=0.1, ma
 body_mult   = input.float(0.3, "Body conferma minimo ATR", group="Spike", minval=0.1, maxval=1.0)
 
 risk_pct    = input.float(0.5, "Rischio % per trade", group="Rischio", minval=0.1, maxval=3.0, step=0.1)
-max_concurrent = input.int(15, "Max trade simultanei", group="Rischio", minval=1, maxval=20, tooltip="Quanti trade può tenere aperti il bot contemporaneamente. Più alto = più libertà ma più rischio (ogni trade aggiunge il suo rischio % al totale).")
 sl_atr_mult = input.float(0.6, "SL buffer ATR", group="Rischio", minval=0.1, maxval=2.0, step=0.1)
 tp1_pct     = input.float(70,  "% chiusura TP1", group="Rischio", minval=10, maxval=90)
 use_be      = input.bool(true, "Break-even dopo TP1", group="Rischio")
@@ -318,9 +316,9 @@ score_ok_sell = score_sell >= eff_min_score
 score_ok_buy  = score_buy  >= eff_min_score
 
 // ─── SEGNALI ──────────────────────────────────────────────
-final_sell = confirm_sell and price_at_supply and h1_bear and m15_bear and rsi_ok_sell and hour_ok and atr_ok and adx_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_sell and strategy.opentrades < max_concurrent
+final_sell = confirm_sell and price_at_supply and h1_bear and m15_bear and rsi_ok_sell and hour_ok and atr_ok and adx_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_sell and strategy.position_size == 0
 
-final_buy  = confirm_buy  and price_at_demand and h1_bull and m15_bull and rsi_ok_buy  and hour_ok and atr_ok and adx_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_buy  and strategy.opentrades < max_concurrent
+final_buy  = confirm_buy  and price_at_demand and h1_bull and m15_bull and rsi_ok_buy  and hour_ok and atr_ok and adx_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_buy  and strategy.position_size == 0
 
 // ─── POSITION SIZING DINAMICO ─────────────────────────────
 // Calcola la qty in base al rischio % e alla distanza dello SL.
