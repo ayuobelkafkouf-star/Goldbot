@@ -67,25 +67,17 @@ news_before  = input.int(30, "Minuti prima", group="Notizie")
 news_after   = input.int(30, "Minuti dopo",  group="Notizie")
 
 // ─── TIMEFRAME DATA (NO REPAINT) ──────────────────────────
-// Usiamo [1] sui valori HTF + lookahead_off per evitare il repainting in live.
-f_sec(_tf, _src) => request.security(syminfo.tickerid, _tf, _src[1], lookahead=barmerge.lookahead_off)
+// Un'unica request.security per timeframe (tupla) invece di una chiamata per
+// serie: stessi identici valori ma molte meno richieste HTF → script più veloce.
+// Manteniamo [1] su ogni sorgente + lookahead_off per evitare il repaint in live.
+[m15_ef, m15_es, m15_rsi, m15_high, m15_low, m15_close, m15_open, m15_atr, m15_ph, m15_pl, m15_struct_high, m15_struct_low] = request.security(syminfo.tickerid, "15",
+  [ta.ema(close, m15_fast)[1], ta.ema(close, m15_slow)[1], ta.rsi(close, rsi_len)[1], high[1], low[1], close[1], open[1], ta.atr(14)[1], ta.pivothigh(high, pivot_left, pivot_right)[1], ta.pivotlow(low, pivot_left, pivot_right)[1], ta.highest(high, 20)[1], ta.lowest(low, 20)[1]],
+  lookahead=barmerge.lookahead_off)
 
-h1_ef  = f_sec("60", ta.ema(close, h1_fast))
-h1_es  = f_sec("60", ta.ema(close, h1_slow))
-m15_ef = f_sec("15", ta.ema(close, m15_fast))
-m15_es = f_sec("15", ta.ema(close, m15_slow))
-m15_rsi    = f_sec("15", ta.rsi(close, rsi_len))
-m15_high   = f_sec("15", high)
-m15_low    = f_sec("15", low)
-m15_close  = f_sec("15", close)
-m15_open   = f_sec("15", open)
-m15_atr    = f_sec("15", ta.atr(14))
-m15_ph     = f_sec("15", ta.pivothigh(high, pivot_left, pivot_right))
-m15_pl     = f_sec("15", ta.pivotlow (low,  pivot_left, pivot_right))
-m15_struct_high = f_sec("15", ta.highest(high, 20))
-m15_struct_low  = f_sec("15", ta.lowest (low,  20))
-h1_struct_high  = f_sec("60", ta.highest(high, 20))
-h1_struct_low   = f_sec("60", ta.lowest (low,  20))
+[h1_ef, h1_es, h1_struct_high, h1_struct_low] = request.security(syminfo.tickerid, "60",
+  [ta.ema(close, h1_fast)[1], ta.ema(close, h1_slow)[1], ta.highest(high, 20)[1], ta.lowest(low, 20)[1]],
+  lookahead=barmerge.lookahead_off)
+
 atr_val    = ta.atr(14)
 
 // ─── TREND ────────────────────────────────────────────────
@@ -210,22 +202,18 @@ atr_ok      = not use_atr or atr_val >= atr_min
 rsi_ok_sell = m15_rsi > 45 and m15_rsi < rsi_ob
 rsi_ok_buy  = m15_rsi < 55 and m15_rsi > rsi_os
 
-current_hour = hour(time, "Europe/Rome")
-current_min  = minute(time, "Europe/Rome")
-current_mins = current_hour * 60 + current_min
+current_mins = h_now * 60 + minute(time, "Europe/Rome")
 in_news(_act, _h, _m) => _act and current_mins >= (_h*60+_m - news_before) and current_mins <= (_h*60+_m + news_after)
 in_news_any = in_news(news1_active, news1_hour, news1_min) or in_news(news2_active, news2_hour, news2_min) or in_news(news3_active, news3_hour, news3_min)
 news_ok     = not use_news or not in_news_any
 
 var int last_close_bar = 0
 var int trades_today   = 0
-var int last_trade_day = -1
 current_day = dayofmonth(time, "Europe/Rome")
 new_day = ta.change(current_day) != 0
 
 if new_day
-    trades_today   := 0
-    last_trade_day := current_day
+    trades_today := 0
 
 if strategy.position_size[1] != 0 and strategy.position_size == 0
     last_close_bar := bar_index
