@@ -36,6 +36,13 @@ use_be      = input.bool(true, "Break-even dopo TP1", group="Rischio")
 use_trail   = input.bool(true, "Trailing stop ATR dopo TP1", group="Rischio")
 trail_mult  = input.float(1.5, "Trailing ATR mult", group="Rischio", minval=0.5, maxval=5.0, step=0.1)
 
+// ─── MIGLIORAMENTI OPZIONALI (OFF di default = grafico invariato) ───
+// Attivali uno alla volta e confronta il backtest: filtrano i setup peggiori.
+use_rr        = input.bool(false, "Filtro Risk/Reward minimo", group="⚙️ Miglioramenti", tooltip="Scarta i setup dove TP1 è troppo vicino allo stop (poco margine di guadagno). Riduce il numero di trade ma alza la qualità media.")
+min_rr        = input.float(1.5, "R:R minimo (TP1/SL)", group="⚙️ Miglioramenti", minval=0.5, maxval=5.0, step=0.1)
+use_trend_px  = input.bool(false, "Conferma prezzo vs EMA H1", group="⚙️ Miglioramenti", tooltip="Entra BUY solo se il prezzo è sopra la EMA veloce H1 (e viceversa per SELL): allineamento di trend più forte, meno falsi segnali.")
+use_vol_conf  = input.bool(false, "Richiedi volume sopra media", group="⚙️ Miglioramenti", tooltip="Entra solo quando il volume conferma il movimento (volume > media x1.2). Evita spike a bassa partecipazione.")
+
 use_session   = input.bool(true, "Filtro sessione London/NY overlap", group="Filtri")
 session_start = input.int(13, "Sessione start (Roma)", group="Filtri", minval=0, maxval=23)
 session_end   = input.int(17, "Sessione end (Roma)",   group="Filtri", minval=0, maxval=23)
@@ -267,10 +274,23 @@ setup_color   = best_score >= 80 ? color.lime : best_score >= 50 ? color.yellow 
 score_ok_sell = score_sell >= eff_min_score
 score_ok_buy  = score_buy  >= eff_min_score
 
-// ─── SEGNALI ──────────────────────────────────────────────
-final_sell = confirm_sell and price_at_supply and h1_bear and m15_bear and rsi_ok_sell and hour_ok and atr_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_sell and strategy.position_size == 0
+// ─── FILTRI OPZIONALI DI QUALITÀ (neutri se i toggle sono OFF) ─────
+// R:R su TP1 usando le stesse formule SL/TP degli ingressi.
+rr_risk_buy  = close - (m15_low  - atr_val * sl_atr_mult)
+rr_risk_sell = (m15_high + atr_val * sl_atr_mult) - close
+rr_buy   = rr_risk_buy  > 0 ? (m15_struct_high - close) / rr_risk_buy  : 0.0
+rr_sell  = rr_risk_sell > 0 ? (close - m15_struct_low)  / rr_risk_sell : 0.0
+rr_ok_buy     = not use_rr or rr_buy  >= min_rr
+rr_ok_sell    = not use_rr or rr_sell >= min_rr
+trend_ok_buy  = not use_trend_px or close > h1_ef
+trend_ok_sell = not use_trend_px or close < h1_ef
+vol_ok_buy    = not use_vol_conf or vol_high
+vol_ok_sell   = not use_vol_conf or vol_high
 
-final_buy  = confirm_buy  and price_at_demand and h1_bull and m15_bull and rsi_ok_buy  and hour_ok and atr_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_buy  and strategy.position_size == 0
+// ─── SEGNALI ──────────────────────────────────────────────
+final_sell = confirm_sell and price_at_supply and h1_bear and m15_bear and rsi_ok_sell and hour_ok and atr_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_sell and rr_ok_sell and trend_ok_sell and vol_ok_sell and strategy.position_size == 0
+
+final_buy  = confirm_buy  and price_at_demand and h1_bull and m15_bull and rsi_ok_buy  and hour_ok and atr_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_buy  and rr_ok_buy  and trend_ok_buy  and vol_ok_buy  and strategy.position_size == 0
 
 // ─── POSITION SIZING DINAMICO ─────────────────────────────
 // Calcola la qty in base al rischio % e alla distanza dello SL.
