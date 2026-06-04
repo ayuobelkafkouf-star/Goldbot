@@ -35,8 +35,6 @@ tp1_pct     = input.float(70,  "% chiusura TP1", group="Rischio", minval=10, max
 use_be      = input.bool(true, "Break-even dopo TP1", group="Rischio")
 use_trail   = input.bool(true, "Trailing stop ATR dopo TP1", group="Rischio")
 trail_mult  = input.float(1.5, "Trailing ATR mult", group="Rischio", minval=0.5, maxval=5.0, step=0.1)
-use_rr      = input.bool(true, "Filtro Risk/Reward minimo", group="Rischio", tooltip="Scarta i setup dove la distanza dall'ingresso a TP1 è troppo piccola rispetto allo stop: alza la qualità media dei trade.")
-min_rr      = input.float(1.0, "R:R minimo (TP1/SL)", group="Rischio", minval=0.3, maxval=5.0, step=0.1)
 
 use_session   = input.bool(true, "Filtro sessione London/NY overlap", group="Filtri")
 session_start = input.int(13, "Sessione start (Roma)", group="Filtri", minval=0, maxval=23)
@@ -69,17 +67,25 @@ news_before  = input.int(30, "Minuti prima", group="Notizie")
 news_after   = input.int(30, "Minuti dopo",  group="Notizie")
 
 // ─── TIMEFRAME DATA (NO REPAINT) ──────────────────────────
-// Un'unica request.security per timeframe (tupla) invece di una chiamata per
-// serie: stessi valori ma molte meno richieste HTF → script più leggero/veloce.
-// Manteniamo [1] su ogni sorgente + lookahead_off per evitare il repaint in live.
-[m15_ef, m15_es, m15_rsi, m15_high, m15_low, m15_close, m15_open, m15_atr, m15_ph, m15_pl, m15_struct_high, m15_struct_low] = request.security(syminfo.tickerid, "15",
-  [ta.ema(close, m15_fast)[1], ta.ema(close, m15_slow)[1], ta.rsi(close, rsi_len)[1], high[1], low[1], close[1], open[1], ta.atr(14)[1], ta.pivothigh(high, pivot_left, pivot_right)[1], ta.pivotlow(low, pivot_left, pivot_right)[1], ta.highest(high, 20)[1], ta.lowest(low, 20)[1]],
-  lookahead=barmerge.lookahead_off)
+// Usiamo [1] sui valori HTF + lookahead_off per evitare il repainting in live.
+f_sec(_tf, _src) => request.security(syminfo.tickerid, _tf, _src[1], lookahead=barmerge.lookahead_off)
 
-[h1_ef, h1_es, h1_struct_high, h1_struct_low] = request.security(syminfo.tickerid, "60",
-  [ta.ema(close, h1_fast)[1], ta.ema(close, h1_slow)[1], ta.highest(high, 20)[1], ta.lowest(low, 20)[1]],
-  lookahead=barmerge.lookahead_off)
-
+h1_ef  = f_sec("60", ta.ema(close, h1_fast))
+h1_es  = f_sec("60", ta.ema(close, h1_slow))
+m15_ef = f_sec("15", ta.ema(close, m15_fast))
+m15_es = f_sec("15", ta.ema(close, m15_slow))
+m15_rsi    = f_sec("15", ta.rsi(close, rsi_len))
+m15_high   = f_sec("15", high)
+m15_low    = f_sec("15", low)
+m15_close  = f_sec("15", close)
+m15_open   = f_sec("15", open)
+m15_atr    = f_sec("15", ta.atr(14))
+m15_ph     = f_sec("15", ta.pivothigh(high, pivot_left, pivot_right))
+m15_pl     = f_sec("15", ta.pivotlow (low,  pivot_left, pivot_right))
+m15_struct_high = f_sec("15", ta.highest(high, 20))
+m15_struct_low  = f_sec("15", ta.lowest (low,  20))
+h1_struct_high  = f_sec("60", ta.highest(high, 20))
+h1_struct_low   = f_sec("60", ta.lowest (low,  20))
 atr_val    = ta.atr(14)
 
 // ─── TREND ────────────────────────────────────────────────
@@ -204,18 +210,22 @@ atr_ok      = not use_atr or atr_val >= atr_min
 rsi_ok_sell = m15_rsi > 45 and m15_rsi < rsi_ob
 rsi_ok_buy  = m15_rsi < 55 and m15_rsi > rsi_os
 
-current_mins = h_now * 60 + minute(time, "Europe/Rome")
+current_hour = hour(time, "Europe/Rome")
+current_min  = minute(time, "Europe/Rome")
+current_mins = current_hour * 60 + current_min
 in_news(_act, _h, _m) => _act and current_mins >= (_h*60+_m - news_before) and current_mins <= (_h*60+_m + news_after)
 in_news_any = in_news(news1_active, news1_hour, news1_min) or in_news(news2_active, news2_hour, news2_min) or in_news(news3_active, news3_hour, news3_min)
 news_ok     = not use_news or not in_news_any
 
 var int last_close_bar = 0
 var int trades_today   = 0
+var int last_trade_day = -1
 current_day = dayofmonth(time, "Europe/Rome")
 new_day = ta.change(current_day) != 0
 
 if new_day
-    trades_today := 0
+    trades_today   := 0
+    last_trade_day := current_day
 
 if strategy.position_size[1] != 0 and strategy.position_size == 0
     last_close_bar := bar_index
@@ -269,27 +279,10 @@ setup_color   = best_score >= 80 ? color.lime : best_score >= 50 ? color.yellow 
 score_ok_sell = score_sell >= eff_min_score
 score_ok_buy  = score_buy  >= eff_min_score
 
-// ─── SL/TP CANDIDATI + FILTRO RISCHIO/RENDIMENTO ──────────
-// Calcoliamo i livelli una sola volta qui: servono sia al filtro R:R sia
-// all'ingresso vero e proprio (niente ricalcolo duplicato nei blocchi entry).
-cand_sl_buy   = m15_low  - atr_val * sl_atr_mult
-cand_sl_sell  = m15_high + atr_val * sl_atr_mult
-cand_tp1_buy  = m15_struct_high
-cand_tp1_sell = m15_struct_low
-cand_tp2_buy  = h1_struct_high
-cand_tp2_sell = h1_struct_low
-
-risk_buy   = close - cand_sl_buy
-risk_sell  = cand_sl_sell - close
-rr_buy     = risk_buy  > 0 ? (cand_tp1_buy  - close) / risk_buy  : 0.0
-rr_sell    = risk_sell > 0 ? (close - cand_tp1_sell) / risk_sell : 0.0
-rr_ok_buy  = not use_rr or rr_buy  >= min_rr
-rr_ok_sell = not use_rr or rr_sell >= min_rr
-
 // ─── SEGNALI ──────────────────────────────────────────────
-final_sell = confirm_sell and price_at_supply and h1_bear and m15_bear and rsi_ok_sell and hour_ok and atr_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_sell and rr_ok_sell and strategy.position_size == 0
+final_sell = confirm_sell and price_at_supply and h1_bear and m15_bear and rsi_ok_sell and hour_ok and atr_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_sell and strategy.position_size == 0
 
-final_buy  = confirm_buy  and price_at_demand and h1_bull and m15_bull and rsi_ok_buy  and hour_ok and atr_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_buy  and rr_ok_buy  and strategy.position_size == 0
+final_buy  = confirm_buy  and price_at_demand and h1_bull and m15_bull and rsi_ok_buy  and hour_ok and atr_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_buy  and strategy.position_size == 0
 
 // ─── POSITION SIZING DINAMICO ─────────────────────────────
 // Calcola la qty in base al rischio % e alla distanza dello SL.
@@ -314,9 +307,9 @@ var box sl_box  = na
 
 if final_buy
     last_buy_bar := bar_index
-    sl_buy   := cand_sl_buy
-    tp1_buy  := cand_tp1_buy
-    tp2_buy  := cand_tp2_buy
+    sl_buy   := m15_low - atr_val * sl_atr_mult
+    tp1_buy  := m15_struct_high
+    tp2_buy  := h1_struct_high
     entry_px := close
     be_active := false
     qty      = f_qty(close - sl_buy)
@@ -329,9 +322,9 @@ if final_buy
 
 if final_sell
     last_sell_bar := bar_index
-    sl_sell  := cand_sl_sell
-    tp1_sell := cand_tp1_sell
-    tp2_sell := cand_tp2_sell
+    sl_sell  := m15_high + atr_val * sl_atr_mult
+    tp1_sell := m15_struct_low
+    tp2_sell := h1_struct_low
     entry_px := close
     be_active := false
     qty      = f_qty(sl_sell - close)
@@ -435,10 +428,8 @@ if barstate.islast
     table.cell(t, 0, 12, "DD / Status",   text_color=color.gray, text_size=size.tiny)
     circuit_txt = circuit_ok ? ("ACTIVE ✅  " + str.tostring(math.round(dd_pct,1)) + "%") : ("PAUSED 🛑 " + str.tostring(pause_left) + "g")
     table.cell(t, 1, 12, circuit_txt, text_color=circuit_ok ? color.lime : color.red, text_size=size.tiny)
-    best_rr = best_dir == "BUY" ? rr_buy : best_dir == "SELL" ? rr_sell : na
-    rr_txt  = na(best_rr) or best_rr <= 0 ? "" : "  R:R " + str.tostring(math.round(best_rr, 1))
     table.cell(t, 0, 13, "Setup",         text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 13, setup_quality + " (" + str.tostring(best_score) + ")" + rr_txt + " " + best_dir, text_color=setup_color, text_size=size.tiny)
+    table.cell(t, 1, 13, setup_quality + " (" + str.tostring(best_score) + ") " + best_dir, text_color=setup_color, text_size=size.tiny)
     table.cell(t, 0, 14, "── SELL ──",    text_color=color.red,  text_size=size.tiny, bgcolor=color.new(color.black,50))
     table.cell(t, 1, 14, "",              text_color=color.red,  text_size=size.tiny, bgcolor=color.new(color.black,50))
     table.cell(t, 0, 15, "H1 bear",       text_color=color.gray, text_size=size.tiny)
