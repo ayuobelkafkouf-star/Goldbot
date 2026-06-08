@@ -58,6 +58,17 @@ use_adaptive_sl  = input.bool(true, "Stop loss adattivo alla volatilità", group
 vol_high_mult    = input.float(1.2, "Soglia alta volatilità (x ATR medio)", group="Anti-Whipsaw", minval=1.1, maxval=3.0, step=0.1)
 sl_high_vol_mult = input.float(2.0, "Moltiplicatore SL in alta volatilità", group="Anti-Whipsaw", minval=1.0, maxval=3.0, step=0.25)
 
+// ─── AUTO-ADATTIVO (il bot si regola dai risultati recenti) ─────
+use_adaptive       = input.bool(true, "Auto-adattivo (impara dai trade recenti)", group="🧠 Auto-adattivo", tooltip="Il bot si regola da solo: dopo perdite consecutive diventa più selettivo (score/R:R/cooldown più alti) e penalizza il lato che sta perdendo di recente. Calcolato live dai trade. Niente modifiche manuali.")
+adapt_window       = input.int(15, "Finestra trade recenti", group="🧠 Auto-adattivo", minval=4, maxval=100)
+adapt_max_steps    = input.int(3, "Perdite consecutive max considerate", group="🧠 Auto-adattivo", minval=1, maxval=10)
+adapt_score_step   = input.int(7, "+ Score per perdita consecutiva", group="🧠 Auto-adattivo", minval=0, maxval=20)
+adapt_rr_step      = input.float(0.2, "+ R:R per perdita consecutiva", group="🧠 Auto-adattivo", minval=0.0, maxval=1.0, step=0.05)
+adapt_cd_step      = input.int(2, "+ Cooldown barre per perdita", group="🧠 Auto-adattivo", minval=0, maxval=10)
+adapt_min_samples  = input.int(4, "Trade minimi per valutare un lato", group="🧠 Auto-adattivo", minval=2, maxval=50)
+adapt_weak_wr      = input.float(35.0, "Win rate lato debole (%)", group="🧠 Auto-adattivo", minval=0, maxval=100, tooltip="Se BUY o SELL nella finestra ha win rate sotto questa soglia, quel lato diventa più selettivo.")
+adapt_side_penalty = input.int(15, "+ Score per il lato debole", group="🧠 Auto-adattivo", minval=0, maxval=40)
+
 use_atr    = input.bool(true, "Filtro ATR", group="Filtri")
 atr_min    = input.float(1.5, "ATR minimo", group="Filtri")
 cooldown_bars  = input.int(5, "Cooldown barre", group="Filtri")
@@ -230,6 +241,10 @@ news_ok     = not use_news or not in_news_any
 var int  last_close_bar    = 0
 var int  trades_today      = 0
 var bool last_trade_was_sl = false
+var int  win_streak        = 0
+var int  loss_streak       = 0
+var array<int> adp_win  = array.new<int>()
+var array<int> adp_side = array.new<int>()
 current_day = dayofmonth(time, "Europe/Rome")
 new_day = ta.change(current_day) != 0
 
@@ -240,9 +255,43 @@ if strategy.position_size[1] != 0 and strategy.position_size == 0
     last_close_bar := bar_index
     trades_today   := trades_today + 1
     if strategy.closedtrades > 0
-        last_trade_was_sl := strategy.closedtrades.profit(strategy.closedtrades - 1) < 0
+        _prof = strategy.closedtrades.profit(strategy.closedtrades - 1)
+        last_trade_was_sl := _prof < 0
+        if _prof > 0
+            win_streak  := win_streak + 1
+            loss_streak := 0
+        else
+            loss_streak := loss_streak + 1
+            win_streak  := 0
+        array.push(adp_win,  _prof > 0 ? 1 : 0)
+        array.push(adp_side, str.contains(strategy.closedtrades.entry_id(strategy.closedtrades - 1), "BUY") ? 1 : -1)
+        if array.size(adp_win) > adapt_window
+            array.shift(adp_win)
+            array.shift(adp_side)
 
-extended_cd = use_smart_cd and last_trade_was_sl ? math.max(eff_cooldown_bars, post_sl_cooldown) : eff_cooldown_bars
+// ─── AUTO-ADATTIVO: regola la selettività in base ai risultati recenti ────
+adp_buy_n  = 0
+adp_buy_w  = 0
+adp_sell_n = 0
+adp_sell_w = 0
+if array.size(adp_win) > 0
+    for i = 0 to array.size(adp_win) - 1
+        if array.get(adp_side, i) == 1
+            adp_buy_n  := adp_buy_n + 1
+            adp_buy_w  := adp_buy_w + array.get(adp_win, i)
+        else
+            adp_sell_n := adp_sell_n + 1
+            adp_sell_w := adp_sell_w + array.get(adp_win, i)
+adp_buy_wr  = adp_buy_n  > 0 ? adp_buy_w  / adp_buy_n  * 100.0 : na
+adp_sell_wr = adp_sell_n > 0 ? adp_sell_w / adp_sell_n * 100.0 : na
+adp_steps       = math.min(loss_streak, adapt_max_steps)
+adapt_score_eff = use_adaptive ? math.min(eff_min_score + adp_steps * adapt_score_step, 95) : eff_min_score
+adapt_min_rr    = use_adaptive ? min_rr + adp_steps * adapt_rr_step : min_rr
+adapt_cd_extra  = use_adaptive ? adp_steps * adapt_cd_step : 0
+buy_pen  = use_adaptive and adp_buy_n  >= adapt_min_samples and adp_buy_wr  < adapt_weak_wr ? adapt_side_penalty : 0
+sell_pen = use_adaptive and adp_sell_n >= adapt_min_samples and adp_sell_wr < adapt_weak_wr ? adapt_side_penalty : 0
+
+extended_cd = (use_smart_cd and last_trade_was_sl ? math.max(eff_cooldown_bars, post_sl_cooldown) : eff_cooldown_bars) + adapt_cd_extra
 cooldown_ok = (bar_index - last_close_bar) >= extended_cd
 trades_ok   = not enable_max_trades or trades_today < eff_max_trades
 
@@ -288,8 +337,8 @@ best_dir   = score_sell > score_buy ? "SELL" : score_buy > score_sell ? "BUY" : 
 setup_quality = best_score >= 80 ? "FORTE 🟢" : best_score >= 50 ? "MEDIO 🟡" : "DEBOLE 🔴"
 setup_color   = best_score >= 80 ? color.lime : best_score >= 50 ? color.yellow : color.red
 
-score_ok_sell = score_sell >= eff_min_score
-score_ok_buy  = score_buy  >= eff_min_score
+score_ok_sell = score_sell >= (adapt_score_eff + sell_pen)
+score_ok_buy  = score_buy  >= (adapt_score_eff + buy_pen)
 
 // ─── FILTRO RISK/REWARD ───────────────────────────────────
 // Stessa formula SL/TP degli ingressi (incl. SL adattivo): scarta i setup
@@ -298,8 +347,8 @@ rr_risk_buy  = close - (m15_low  - atr_val * eff_sl_atr_mult)
 rr_risk_sell = (m15_high + atr_val * eff_sl_atr_mult) - close
 rr_buy   = rr_risk_buy  > 0 ? (m15_struct_high - close) / rr_risk_buy  : 0.0
 rr_sell  = rr_risk_sell > 0 ? (close - m15_struct_low)  / rr_risk_sell : 0.0
-rr_ok_buy  = not use_rr or rr_buy  >= min_rr
-rr_ok_sell = not use_rr or rr_sell >= min_rr
+rr_ok_buy  = not use_rr or rr_buy  >= adapt_min_rr
+rr_ok_sell = not use_rr or rr_sell >= adapt_min_rr
 
 // ─── SEGNALI ──────────────────────────────────────────────
 final_sell = confirm_sell and price_at_supply and h1_bear and m15_bear and rsi_ok_sell and hour_ok and atr_ok and adx_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_sell and rr_ok_sell and strategy.position_size == 0
@@ -418,15 +467,15 @@ if barstate.islast and show_debug
     sell_reasons := sell_reasons + (h1_bear         ? "✅" : "❌") + " H1 ribassista\n"
     sell_reasons := sell_reasons + (m15_bear        ? "✅" : "❌") + " M15 ribassista\n"
     sell_reasons := sell_reasons + (rsi_ok_sell     ? "✅" : "❌") + " RSI ok (" + str.tostring(math.round(m15_rsi,1)) + ")\n"
-    sell_reasons := sell_reasons + (score_ok_sell   ? "✅" : "❌") + " Score " + str.tostring(score_sell) + "/" + str.tostring(eff_min_score) + "\n"
-    sell_reasons := sell_reasons + (rr_ok_sell      ? "✅" : "❌") + " R:R " + str.tostring(math.round(rr_sell,2)) + "/" + str.tostring(min_rr) + "\n"
+    sell_reasons := sell_reasons + (score_ok_sell   ? "✅" : "❌") + " Score " + str.tostring(score_sell) + "/" + str.tostring(adapt_score_eff + sell_pen) + "\n"
+    sell_reasons := sell_reasons + (rr_ok_sell      ? "✅" : "❌") + " R:R " + str.tostring(math.round(rr_sell,2)) + "/" + str.tostring(math.round(adapt_min_rr,2)) + "\n"
     buy_reasons := buy_reasons + (confirm_buy     ? "✅" : "❌") + " Spike+Body BUY\n"
     buy_reasons := buy_reasons + (price_at_demand ? "✅" : "❌") + " Zona Demand attiva\n"
     buy_reasons := buy_reasons + (h1_bull         ? "✅" : "❌") + " H1 rialzista\n"
     buy_reasons := buy_reasons + (m15_bull        ? "✅" : "❌") + " M15 rialzista\n"
     buy_reasons := buy_reasons + (rsi_ok_buy      ? "✅" : "❌") + " RSI ok (" + str.tostring(math.round(m15_rsi,1)) + ")\n"
-    buy_reasons := buy_reasons + (score_ok_buy    ? "✅" : "❌") + " Score " + str.tostring(score_buy) + "/" + str.tostring(eff_min_score) + "\n"
-    buy_reasons := buy_reasons + (rr_ok_buy       ? "✅" : "❌") + " R:R " + str.tostring(math.round(rr_buy,2)) + "/" + str.tostring(min_rr) + "\n"
+    buy_reasons := buy_reasons + (score_ok_buy    ? "✅" : "❌") + " Score " + str.tostring(score_buy) + "/" + str.tostring(adapt_score_eff + buy_pen) + "\n"
+    buy_reasons := buy_reasons + (rr_ok_buy       ? "✅" : "❌") + " R:R " + str.tostring(math.round(rr_buy,2)) + "/" + str.tostring(math.round(adapt_min_rr,2)) + "\n"
     common = ""
     common := common + (hour_ok     ? "✅" : "❌") + " Orario\n"
     common := common + (atr_ok      ? "✅" : "❌") + " ATR (" + str.tostring(math.round(atr_val,2)) + ")\n"
@@ -437,6 +486,9 @@ if barstate.islast and show_debug
     common := common + (day_ok      ? "✅" : "❌") + " P&L giorno (" + str.tostring(math.round(day_pct,2)) + "%)\n"
     common := common + (circuit_ok  ? "✅" : "❌") + " Circuit breaker\n"
     common := common + (is_high_vol ? "⚡" : "🟢") + " Volatilità " + (is_high_vol ? "ALTA (SL " + str.tostring(eff_sl_atr_mult, "#.##") + " ATR)" : "normale") + "\n"
+    streak_txt = loss_streak > 0 ? "−" + str.tostring(loss_streak) : win_streak > 0 ? "+" + str.tostring(win_streak) : "0"
+    common := common + (use_adaptive ? "🧠" : "⚪") + " Adattivo streak " + streak_txt + " → score≥" + str.tostring(adapt_score_eff) + " R:R≥" + str.tostring(math.round(adapt_min_rr,2)) + "\n"
+    common := common + "   WR recenti: BUY " + (na(adp_buy_wr) ? "n/d" : str.tostring(math.round(adp_buy_wr)) + "%" + (buy_pen > 0 ? " 🔻" : "")) + " | SELL " + (na(adp_sell_wr) ? "n/d" : str.tostring(math.round(adp_sell_wr)) + "%" + (sell_pen > 0 ? " 🔻" : "")) + "\n"
     flat = strategy.position_size == 0
     pos_status = flat ? "✅ Flat (può entrare)" : "❌ Posizione aperta"
     title = final_buy ? "🟢 ENTRATA BUY!" : final_sell ? "🔴 ENTRATA SELL!" : "⏸️ NESSUNA ENTRATA"
@@ -496,7 +548,7 @@ supply_display = sup_count > 0 ? str.tostring(sup_count) + " attive (ultima: " +
 demand_display = dem_count > 0 ? str.tostring(dem_count) + " attive (ultima: " + str.tostring(math.round(array.get(dem_bots, dem_count-1),2)) + "-" + str.tostring(math.round(array.get(dem_tops, dem_count-1),2)) + ")" : "─"
 
 if barstate.islast
-    mode_badge = is_quality_24h ? " 💎" : is_aggressive ? " ⚡" : is_extended ? " 🕐" : ""
+    mode_badge = (is_quality_24h ? " 💎" : is_aggressive ? " ⚡" : is_extended ? " 🕐" : "") + (use_adaptive ? " 🧠" : "")
     table.cell(t, 0, 0,  "GoldBot v5.2" + mode_badge,  text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.black,50))
     table.cell(t, 0, 1,  "H1 Trend",      text_color=color.gray, text_size=size.tiny)
     table.cell(t, 1, 1,  h1_bull ? "RIALZISTA ▲" : "RIBASSISTA ▼", text_color=h1_bull ? color.lime : color.red, text_size=size.tiny)
