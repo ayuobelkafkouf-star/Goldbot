@@ -32,10 +32,10 @@ body_mult   = input.float(0.3, "Body conferma minimo ATR", group="Spike", minval
 
 risk_pct    = input.float(0.5, "Rischio % per trade", group="Rischio", minval=0.1, maxval=3.0, step=0.1)
 sl_atr_mult = input.float(0.6, "SL buffer ATR", group="Rischio", minval=0.1, maxval=2.0, step=0.1)
-tp1_pct     = input.float(50,  "% chiusura TP1", group="Rischio", minval=10, maxval=90)
+tp1_pct     = input.float(35,  "% chiusura TP1", group="Rischio", minval=10, maxval=90)
 use_be      = input.bool(true, "Break-even dopo TP1", group="Rischio")
 use_trail   = input.bool(true, "Trailing stop ATR dopo TP1", group="Rischio")
-trail_mult  = input.float(1.5, "Trailing ATR mult", group="Rischio", minval=0.5, maxval=5.0, step=0.1)
+trail_mult  = input.float(2.0, "Trailing ATR mult", group="Rischio", minval=0.5, maxval=5.0, step=0.1)
 use_rr      = input.bool(true, "Filtro Risk/Reward minimo", group="Rischio", tooltip="Non entra se il target TP1 è troppo piccolo rispetto allo stop. 1.0 = TP1 almeno pari al rischio. Blocca i trade con SL più largo del target.")
 min_rr      = input.float(1.5, "R:R minimo (TP1/SL)", group="Rischio", minval=0.3, maxval=5.0, step=0.1)
 
@@ -59,7 +59,7 @@ pause_days   = input.int(3,    "Giorni pausa dopo trigger", group="Protezione", 
 
 // ─── ANTI-WHIPSAW (3 protezioni aggiuntive) ─────
 use_adx          = input.bool(true, "Filtro ADX (entra solo in trend forte)", group="Anti-Whipsaw", tooltip="ADX misura la forza del trend. Sotto soglia il trend è debole/incerto e il bot non entra.")
-adx_threshold    = input.float(22.0, "Soglia ADX minima", group="Anti-Whipsaw", minval=10.0, maxval=50.0, step=1.0)
+adx_threshold    = input.float(18.0, "Soglia ADX minima", group="Anti-Whipsaw", minval=10.0, maxval=50.0, step=1.0)
 use_smart_cd     = input.bool(true, "Cooldown esteso dopo stop loss", group="Anti-Whipsaw", tooltip="Dopo uno stop loss, aspetta più barre prima di rientrare. Evita doppi stop nelle inversioni-trappola.")
 post_sl_cooldown = input.int(10, "Barre cooldown dopo SL", group="Anti-Whipsaw", minval=1, maxval=50)
 use_adaptive_sl  = input.bool(true, "Stop loss adattivo alla volatilità", group="Anti-Whipsaw", tooltip="In giornate di alta volatilità lo SL si allarga automaticamente per evitare stop hunting.")
@@ -139,7 +139,7 @@ eff_no_hour_limit = is_quality_24h
 eff_cooldown_bars = is_aggressive ? 2 : is_quality_24h ? 3 : cooldown_bars
 eff_max_trades    = is_quality_24h ? 8 : is_aggressive ? 10 : max_trades_day
 eff_zone_tol      = is_quality_24h ? zone_tol : is_aggressive ? 0.7 : zone_tol
-eff_min_score     = is_quality_24h ? 65 : is_extended ? math.max(min_score, 70) : min_score
+eff_min_score     = is_quality_24h ? 60 : is_extended ? math.max(min_score, 70) : min_score
 eff_spike_mult    = is_quality_24h ? math.max(spike_mult, 0.5) : spike_mult
 eff_body_mult     = is_quality_24h ? math.max(body_mult,  0.35) : body_mult
 
