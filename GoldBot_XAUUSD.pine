@@ -13,6 +13,7 @@ mode = input.string("Conservativo", "Modalità operativa",
    tooltip="Conservativo: 13-17, score 60, max 5 trade/g. Sessione Estesa: 8-20, score MIN 70, max 5 trade/g. Aggressivo: 8-20, score 60, max 10 trade/g, cooldown 2. 24h QUALITÀ: 24h, score MIN 75, spike+body più stretti, max 8 trade/g, cooldown 3 (selettivo).")
 min_score       = input.int(60, "Score minimo per trade", group="Modalità", minval=0, maxval=100, tooltip="Soglia base. In Sessione Estesa diventa min 70 automaticamente.")
 max_zones       = input.int(5, "Zone attive max per lato", group="Modalità", minval=1, maxval=10)
+strategy_type   = input.string("Entrambe", "Tipo strategia", options=["Zone (retest)", "Trend-Following", "Entrambe"], group="Modalità", tooltip="Zone: aspetta il rimbalzo in supply/demand. Trend-Following: segue il trend (entra quando il prezzo rientra sulla EMA veloce e riparte nel verso del trend) → prende i movimenti dritti. Entrambe: usa tutti e due (più entrate).")
 
 h1_fast  = input.int(21, "H1 EMA veloce", group="Trend H1")
 h1_slow  = input.int(55, "H1 EMA lenta",  group="Trend H1")
@@ -358,10 +359,24 @@ rr_sell  = rr_risk_sell > 0 ? (close - m15_struct_low)  / rr_risk_sell : 0.0
 rr_ok_buy  = not use_rr or rr_buy  >= adapt_min_rr
 rr_ok_sell = not use_rr or rr_sell >= adapt_min_rr
 
-// ─── SEGNALI ──────────────────────────────────────────────
-final_sell = confirm_sell and price_at_supply and h1_bear and m15_bear and rsi_ok_sell and hour_ok and atr_ok and adx_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_sell and rr_ok_sell and strategy.position_size == 0
+// ─── CORE SETUP per tipo strategia ────────────────────────
+use_zone = strategy_type == "Zone (retest)" or strategy_type == "Entrambe"
+use_tf   = strategy_type == "Trend-Following" or strategy_type == "Entrambe"
+// ZONE: rimbalzo in supply/demand (logica originale, controtendenza)
+zone_core_sell = confirm_sell and price_at_supply and h1_bear and m15_bear and rsi_ok_sell
+zone_core_buy  = confirm_buy  and price_at_demand and h1_bull and m15_bull and rsi_ok_buy
+// TREND-FOLLOWING: nel verso del trend, rientro sulla EMA veloce e ripartenza
+ema_fast_c   = ta.ema(close, m15_fast)
+tf_core_sell = h1_bear and m15_bear and ta.crossunder(close, ema_fast_c) and m15_rsi < 60
+tf_core_buy  = h1_bull and m15_bull and ta.crossover(close,  ema_fast_c) and m15_rsi > 40
 
-final_buy  = confirm_buy  and price_at_demand and h1_bull and m15_bull and rsi_ok_buy  and hour_ok and atr_ok and adx_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_buy  and rr_ok_buy  and strategy.position_size == 0
+// ─── SEGNALI ──────────────────────────────────────────────
+// I trade Zone passano anche dal punteggio (score); i Trend-Following no (la
+// qualità è data dall'allineamento di trend). Tutti passano da R:R e filtri comuni.
+common_ok = hour_ok and atr_ok and adx_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and strategy.position_size == 0
+final_sell = ((use_zone and zone_core_sell and score_ok_sell) or (use_tf and tf_core_sell)) and rr_ok_sell and common_ok
+
+final_buy  = ((use_zone and zone_core_buy and score_ok_buy) or (use_tf and tf_core_buy)) and rr_ok_buy and common_ok
 
 // ─── POSITION SIZING DINAMICO ─────────────────────────────
 f_qty(_sl_dist) =>
@@ -592,6 +607,7 @@ if barstate.islast and show_debug
     common := common + (use_adaptive ? "🧠" : "⚪") + " Adattivo streak " + streak_txt + " → score≥" + str.tostring(adapt_score_eff) + " R:R≥" + str.tostring(math.round(adapt_min_rr,2)) + "\n"
     common := common + "   WR recenti: BUY " + (na(adp_buy_wr) ? "n/d" : str.tostring(math.round(adp_buy_wr)) + "%" + (buy_pen > 0 ? " 🔻" : "")) + " | SELL " + (na(adp_sell_wr) ? "n/d" : str.tostring(math.round(adp_sell_wr)) + "%" + (sell_pen > 0 ? " 🔻" : "")) + "\n"
     common := common + (use_pullback and pend_active ? "⏳ Ordine pullback " + (pend_dir == 1 ? "BUY" : "SELL") + " @ " + str.tostring(math.round(pend_limit,2)) + " (scade " + str.tostring(math.max(0, pullback_expiry - (bar_index - pend_bar))) + "b)\n" : "")
+    common := common + "🎯 " + strategy_type + (use_tf ? " | TF: BUY " + (tf_core_buy ? "✅" : "❌") + " SELL " + (tf_core_sell ? "✅" : "❌") : "") + "\n"
     flat = strategy.position_size == 0
     pos_status = flat ? "✅ Flat (può entrare)" : "❌ Posizione aperta"
     title = final_buy ? "🟢 ENTRATA BUY!" : final_sell ? "🔴 ENTRATA SELL!" : "⏸️ NESSUNA ENTRATA"
