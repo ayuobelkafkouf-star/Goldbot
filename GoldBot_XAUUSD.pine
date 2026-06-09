@@ -32,12 +32,12 @@ body_mult   = input.float(0.3, "Body conferma minimo ATR", group="Spike", minval
 
 risk_pct    = input.float(0.5, "Rischio % per trade", group="Rischio", minval=0.1, maxval=3.0, step=0.1)
 sl_atr_mult = input.float(0.6, "SL buffer ATR", group="Rischio", minval=0.1, maxval=2.0, step=0.1)
-tp1_pct     = input.float(70,  "% chiusura TP1", group="Rischio", minval=10, maxval=90)
+tp1_pct     = input.float(50,  "% chiusura TP1", group="Rischio", minval=10, maxval=90)
 use_be      = input.bool(true, "Break-even dopo TP1", group="Rischio")
 use_trail   = input.bool(true, "Trailing stop ATR dopo TP1", group="Rischio")
 trail_mult  = input.float(1.5, "Trailing ATR mult", group="Rischio", minval=0.5, maxval=5.0, step=0.1)
 use_rr      = input.bool(true, "Filtro Risk/Reward minimo", group="Rischio", tooltip="Non entra se il target TP1 è troppo piccolo rispetto allo stop. 1.0 = TP1 almeno pari al rischio. Blocca i trade con SL più largo del target.")
-min_rr      = input.float(1.0, "R:R minimo (TP1/SL)", group="Rischio", minval=0.3, maxval=5.0, step=0.1)
+min_rr      = input.float(1.5, "R:R minimo (TP1/SL)", group="Rischio", minval=0.3, maxval=5.0, step=0.1)
 
 // ─── ENTRATA SU PULLBACK (prezzo migliore, non a metà movimento) ─────
 use_pullback    = input.bool(true, "Entrata su pullback (prezzo migliore)", group="🎯 Entrata", tooltip="Invece di entrare subito a mercato (a metà del movimento), piazza un ordine limite verso il bordo della zona e aspetta che il prezzo torni: entri dal prezzo migliore con SL più stretto e R:R migliore. Se il prezzo non rientra entro le barre di validità, il trade viene saltato.")
@@ -64,7 +64,7 @@ use_smart_cd     = input.bool(true, "Cooldown esteso dopo stop loss", group="Ant
 post_sl_cooldown = input.int(10, "Barre cooldown dopo SL", group="Anti-Whipsaw", minval=1, maxval=50)
 use_adaptive_sl  = input.bool(true, "Stop loss adattivo alla volatilità", group="Anti-Whipsaw", tooltip="In giornate di alta volatilità lo SL si allarga automaticamente per evitare stop hunting.")
 vol_high_mult    = input.float(1.2, "Soglia alta volatilità (x ATR medio)", group="Anti-Whipsaw", minval=1.1, maxval=3.0, step=0.1)
-sl_high_vol_mult = input.float(2.0, "Moltiplicatore SL in alta volatilità", group="Anti-Whipsaw", minval=1.0, maxval=3.0, step=0.25)
+sl_high_vol_mult = input.float(1.3, "Moltiplicatore SL in alta volatilità", group="Anti-Whipsaw", minval=1.0, maxval=3.0, step=0.25)
 
 // ─── AUTO-ADATTIVO (il bot si regola dai risultati recenti) ─────
 use_adaptive       = input.bool(true, "Auto-adattivo (impara dai trade recenti)", group="🧠 Auto-adattivo", tooltip="Il bot si regola da solo: dopo perdite consecutive diventa più selettivo (score/R:R/cooldown più alti) e penalizza il lato che sta perdendo di recente. Calcolato live dai trade. Niente modifiche manuali.")
