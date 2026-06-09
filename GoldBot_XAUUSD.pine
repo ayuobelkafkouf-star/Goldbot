@@ -13,7 +13,7 @@ mode = input.string("Conservativo", "Modalità operativa",
    tooltip="Conservativo: 13-17, score 60, max 5 trade/g. Sessione Estesa: 8-20, score MIN 70, max 5 trade/g. Aggressivo: 8-20, score 60, max 10 trade/g, cooldown 2. 24h QUALITÀ: 24h, score MIN 75, spike+body più stretti, max 8 trade/g, cooldown 3 (selettivo).")
 min_score       = input.int(60, "Score minimo per trade", group="Modalità", minval=0, maxval=100, tooltip="Soglia base. In Sessione Estesa diventa min 70 automaticamente.")
 max_zones       = input.int(5, "Zone attive max per lato", group="Modalità", minval=1, maxval=10)
-strategy_type   = input.string("Entrambe", "Tipo strategia", options=["Zone (retest)", "Trend-Following", "Entrambe"], group="Modalità", tooltip="Zone: aspetta il rimbalzo in supply/demand. Trend-Following: segue il trend (entra quando il prezzo rientra sulla EMA veloce e riparte nel verso del trend) → prende i movimenti dritti. Entrambe: usa tutti e due (più entrate).")
+strategy_type   = input.string("Trend-Following", "Tipo strategia", options=["Zone (retest)", "Trend-Following", "Entrambe"], group="Modalità", tooltip="Zone: aspetta il rimbalzo in supply/demand. Trend-Following: segue il trend (entra quando il prezzo rientra sulla EMA veloce e riparte nel verso del trend) → prende i movimenti dritti. Entrambe: usa tutti e due (più entrate).")
 
 h1_fast  = input.int(21, "H1 EMA veloce", group="Trend H1")
 h1_slow  = input.int(55, "H1 EMA lenta",  group="Trend H1")
@@ -33,7 +33,9 @@ body_mult   = input.float(0.3, "Body conferma minimo ATR", group="Spike", minval
 
 risk_pct    = input.float(0.5, "Rischio % per trade", group="Rischio", minval=0.1, maxval=3.0, step=0.1)
 sl_atr_mult = input.float(0.6, "SL buffer ATR", group="Rischio", minval=0.1, maxval=2.0, step=0.1)
-tp1_pct     = input.float(35,  "% chiusura TP1", group="Rischio", minval=10, maxval=90)
+tp1_pct     = input.float(80,  "% chiusura TP1", group="Rischio", minval=10, maxval=90)
+use_quick_tp = input.bool(true, "TP rapido a R fisso (alza win rate)", group="Rischio", tooltip="Mette TP1 a un multiplo fisso del rischio (es. 1R) invece che sulla struttura: target più vicino, colpito più spesso → win rate più alto (ma vincite più piccole). Il restante % corre verso TP2.")
+tp1_r        = input.float(1.0, "TP1 in multipli di rischio (R)", group="Rischio", minval=0.3, maxval=5.0, step=0.1)
 use_be      = input.bool(true, "Break-even dopo TP1", group="Rischio")
 use_trail   = input.bool(true, "Trailing stop ATR dopo TP1", group="Rischio")
 trail_mult  = input.float(2.0, "Trailing ATR mult", group="Rischio", minval=0.5, maxval=5.0, step=0.1)
@@ -60,7 +62,7 @@ pause_days   = input.int(3,    "Giorni pausa dopo trigger", group="Protezione", 
 
 // ─── ANTI-WHIPSAW (3 protezioni aggiuntive) ─────
 use_adx          = input.bool(true, "Filtro ADX (entra solo in trend forte)", group="Anti-Whipsaw", tooltip="ADX misura la forza del trend. Sotto soglia il trend è debole/incerto e il bot non entra.")
-adx_threshold    = input.float(18.0, "Soglia ADX minima", group="Anti-Whipsaw", minval=10.0, maxval=50.0, step=1.0)
+adx_threshold    = input.float(24.0, "Soglia ADX minima", group="Anti-Whipsaw", minval=10.0, maxval=50.0, step=1.0)
 use_smart_cd     = input.bool(true, "Cooldown esteso dopo stop loss", group="Anti-Whipsaw", tooltip="Dopo uno stop loss, aspetta più barre prima di rientrare. Evita doppi stop nelle inversioni-trappola.")
 post_sl_cooldown = input.int(10, "Barre cooldown dopo SL", group="Anti-Whipsaw", minval=1, maxval=50)
 use_adaptive_sl  = input.bool(true, "Stop loss adattivo alla volatilità", group="Anti-Whipsaw", tooltip="In giornate di alta volatilità lo SL si allarga automaticamente per evitare stop hunting.")
@@ -356,8 +358,8 @@ rr_risk_buy  = close - (m15_low  - atr_val * eff_sl_atr_mult)
 rr_risk_sell = (m15_high + atr_val * eff_sl_atr_mult) - close
 rr_buy   = rr_risk_buy  > 0 ? (m15_struct_high - close) / rr_risk_buy  : 0.0
 rr_sell  = rr_risk_sell > 0 ? (close - m15_struct_low)  / rr_risk_sell : 0.0
-rr_ok_buy  = not use_rr or rr_buy  >= adapt_min_rr
-rr_ok_sell = not use_rr or rr_sell >= adapt_min_rr
+rr_ok_buy  = not use_rr or use_quick_tp or rr_buy  >= adapt_min_rr
+rr_ok_sell = not use_rr or use_quick_tp or rr_sell >= adapt_min_rr
 
 // ─── CORE SETUP per tipo strategia ────────────────────────
 use_zone = strategy_type == "Zone (retest)" or strategy_type == "Entrambe"
@@ -413,7 +415,7 @@ if use_pullback and strategy.position_size == 0 and not pend_active and (final_b
     _isbuy = final_buy
     _lim   = _isbuy ? close - atr_val * pullback_atr : close + atr_val * pullback_atr
     _slv   = _isbuy ? m15_low - atr_val * eff_sl_atr_mult : m15_high + atr_val * eff_sl_atr_mult
-    _t1    = _isbuy ? m15_struct_high : m15_struct_low
+    _t1    = use_quick_tp ? (_isbuy ? _lim + tp1_r * (_lim - _slv) : _lim - tp1_r * (_slv - _lim)) : (_isbuy ? m15_struct_high : m15_struct_low)
     _t2    = _isbuy ? h1_struct_high  : h1_struct_low
     _ok    = _isbuy ? (_slv < _lim and _lim < _t1) : (_slv > _lim and _lim > _t1)
     if _ok
@@ -446,7 +448,7 @@ if use_pullback and pend_active and strategy.position_size == 0
         if pullback_fallback and pend_dir == 1
             // Ibrido: entra a mercato con livelli ricalcolati al prezzo attuale
             pend_slv  := m15_low - atr_val * eff_sl_atr_mult
-            pend_tp1v := m15_struct_high
+            pend_tp1v := use_quick_tp ? close + tp1_r * (close - pend_slv) : m15_struct_high
             pend_tp2v := h1_struct_high
             if pend_slv < close and close < pend_tp1v
                 strategy.entry("BUY", strategy.long, qty=f_qty(close - pend_slv))
@@ -455,7 +457,7 @@ if use_pullback and pend_active and strategy.position_size == 0
                 pend_active := false
         else if pullback_fallback and pend_dir == -1
             pend_slv  := m15_high + atr_val * eff_sl_atr_mult
-            pend_tp1v := m15_struct_low
+            pend_tp1v := use_quick_tp ? close - tp1_r * (pend_slv - close) : m15_struct_low
             pend_tp2v := h1_struct_low
             if pend_slv > close and close > pend_tp1v
                 strategy.entry("SELL", strategy.short, qty=f_qty(pend_slv - close))
@@ -495,7 +497,7 @@ if use_pullback and pend_active and strategy.position_size != 0
 if not use_pullback and final_buy
     last_buy_bar := bar_index
     sl_buy   := m15_low - atr_val * eff_sl_atr_mult
-    tp1_buy  := m15_struct_high
+    tp1_buy  := use_quick_tp ? close + tp1_r * (close - sl_buy) : m15_struct_high
     tp2_buy  := h1_struct_high
     entry_px := close
     be_active := false
@@ -518,7 +520,7 @@ if not use_pullback and final_buy
 if not use_pullback and final_sell
     last_sell_bar := bar_index
     sl_sell  := m15_high + atr_val * eff_sl_atr_mult
-    tp1_sell := m15_struct_low
+    tp1_sell := use_quick_tp ? close - tp1_r * (sl_sell - close) : m15_struct_low
     tp2_sell := h1_struct_low
     entry_px := close
     be_active := false
