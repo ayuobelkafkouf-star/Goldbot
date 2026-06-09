@@ -43,6 +43,7 @@ use_pullback    = input.bool(true, "Entrata su pullback (prezzo migliore)", grou
 pullback_atr    = input.float(0.6, "Distanza pullback (ATR)", group="🎯 Entrata", minval=0.1, maxval=3.0, step=0.1, tooltip="Quanto mettere l'ordine più indietro rispetto alla candela di conferma. Più alto = prezzo migliore ma meno probabilità che venga riempito.")
 pullback_expiry = input.int(6, "Barre di validità ordine", group="🎯 Entrata", minval=1, maxval=30, tooltip="Se entro queste barre il prezzo non torna al livello, l'ordine viene annullato.")
 pullback_fallback = input.bool(true, "Ibrido: entra a mercato se non si riempie", group="🎯 Entrata", tooltip="Se entro le barre di validità il prezzo non torna al livello, entra comunque a mercato (con SL/TP ricalcolati al prezzo attuale). Così non perdi i movimenti forti che non fanno pullback.")
+show_pullback_line = input.bool(true, "Mostra linea ordine limite in attesa", group="🎯 Entrata", tooltip="Disegna una linea tratteggiata al livello dell'ordine limite mentre il bot aspetta il pullback. Sparisce quando l'ordine viene riempito o scade.")
 
 use_session   = input.bool(true, "Filtro sessione London/NY overlap", group="Filtri")
 session_start = input.int(13, "Sessione start (Roma)", group="Filtri", minval=0, maxval=23)
@@ -516,6 +517,18 @@ if not use_pullback and final_sell
           "\nTP2: "    + str.tostring(tp2_sell, "#.##") +
           "\nScore: "  + str.tostring(score_sell) +
           "\nMode: "   + mode, alert.freq_once_per_bar_close)
+
+// ─── LINEA ORDINE LIMITE PULLBACK IN ATTESA ───────────────
+// Mostra dove il bot ha messo l'ordine al prezzo migliore mentre aspetta il
+// pullback. Sparisce quando l'ordine viene riempito o scade.
+var line  pend_line = na
+var label pend_lbl  = na
+line.delete(pend_line)
+label.delete(pend_lbl)
+if use_pullback and show_pullback_line and pend_active and not na(pend_limit)
+    _pcol = pend_dir == 1 ? color.lime : color.red
+    pend_line := line.new(pend_bar, pend_limit, bar_index + 3, pend_limit, color=_pcol, style=line.style_dashed, width=1)
+    pend_lbl  := label.new(bar_index + 3, pend_limit, "⏳ LIMIT " + (pend_dir == 1 ? "BUY" : "SELL") + " " + str.tostring(math.round(pend_limit, 2)), style=label.style_label_left, color=color.new(_pcol, 80), textcolor=_pcol, size=size.tiny)
 
 // ─── PARZIALE A TP1 + BREAK-EVEN + TRAILING ───────────────
 var float trail_sl = na
