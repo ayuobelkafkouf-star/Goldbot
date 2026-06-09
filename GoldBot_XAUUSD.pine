@@ -35,12 +35,12 @@ risk_pct    = input.float(0.5, "Rischio % per trade", group="Rischio", minval=0.
 sl_atr_mult = input.float(0.6, "SL buffer ATR", group="Rischio", minval=0.1, maxval=2.0, step=0.1)
 tp1_pct     = input.float(80,  "% chiusura TP1", group="Rischio", minval=10, maxval=90)
 use_quick_tp = input.bool(true, "TP rapido a R fisso (alza win rate)", group="Rischio", tooltip="Mette TP1 a un multiplo fisso del rischio (es. 1R) invece che sulla struttura: target più vicino, colpito più spesso → win rate più alto (ma vincite più piccole). Il restante % corre verso TP2.")
-tp1_r        = input.float(1.0, "TP1 in multipli di rischio (R)", group="Rischio", minval=0.3, maxval=5.0, step=0.1)
+tp1_r        = input.float(1.4, "TP1 in multipli di rischio (R)", group="Rischio", minval=0.3, maxval=5.0, step=0.1)
 use_be      = input.bool(true, "Break-even dopo TP1", group="Rischio")
 use_trail   = input.bool(true, "Trailing stop ATR dopo TP1", group="Rischio")
 trail_mult  = input.float(2.0, "Trailing ATR mult", group="Rischio", minval=0.5, maxval=5.0, step=0.1)
 use_rr      = input.bool(true, "Filtro Risk/Reward minimo", group="Rischio", tooltip="Non entra se il target TP1 è troppo piccolo rispetto allo stop. 1.0 = TP1 almeno pari al rischio. Blocca i trade con SL più largo del target.")
-min_rr      = input.float(1.5, "R:R minimo (TP1/SL)", group="Rischio", minval=0.3, maxval=5.0, step=0.1)
+min_rr      = input.float(1.4, "R:R minimo (TP1/SL)", group="Rischio", minval=0.3, maxval=5.0, step=0.1)
 
 // ─── ENTRATA SU PULLBACK (prezzo migliore, non a metà movimento) ─────
 use_pullback    = input.bool(true, "Entrata su pullback (prezzo migliore)", group="🎯 Entrata", tooltip="Invece di entrare subito a mercato (a metà del movimento), piazza un ordine limite verso il bordo della zona e aspetta che il prezzo torni: entri dal prezzo migliore con SL più stretto e R:R migliore. Se il prezzo non rientra entro le barre di validità, il trade viene saltato.")
