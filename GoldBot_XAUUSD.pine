@@ -14,6 +14,7 @@ mode = input.string("Conservativo", "Modalità operativa",
 min_score       = input.int(60, "Score minimo per trade", group="Modalità", minval=0, maxval=100, tooltip="Soglia base. In Sessione Estesa diventa min 70 automaticamente.")
 max_zones       = input.int(5, "Zone attive max per lato", group="Modalità", minval=1, maxval=10)
 strategy_type   = input.string("Trend-Following", "Tipo strategia", options=["Zone (retest)", "Trend-Following", "Entrambe"], group="Modalità", tooltip="Zone: aspetta il rimbalzo in supply/demand. Trend-Following: segue il trend (entra quando il prezzo rientra sulla EMA veloce e riparte nel verso del trend) → prende i movimenti dritti. Entrambe: usa tutti e due (più entrate).")
+tf_use_momentum = input.bool(true, "TF: entra anche su spike di conferma (oltre EMA)", group="Modalità", tooltip="In Trend-Following, oltre al rientro sulla EMA, entra nel verso del trend anche sulle candele di conferma (spike). Cattura i movimenti dritti dove la EMA non incrocia → più entrate. Disattivalo per tornare al solo incrocio EMA.")
 
 h1_fast  = input.int(21, "H1 EMA veloce", group="Trend H1")
 h1_slow  = input.int(55, "H1 EMA lenta",  group="Trend H1")
@@ -373,8 +374,8 @@ zone_core_sell = confirm_sell and price_at_supply and h1_bear and m15_bear and r
 zone_core_buy  = confirm_buy  and price_at_demand and h1_bull and m15_bull and rsi_ok_buy
 // TREND-FOLLOWING: nel verso del trend, rientro sulla EMA veloce e ripartenza
 ema_fast_c   = ta.ema(close, m15_fast)
-tf_core_sell = h1_bear and m15_bear and ta.crossunder(close, ema_fast_c) and m15_rsi < 60
-tf_core_buy  = h1_bull and m15_bull and ta.crossover(close,  ema_fast_c) and m15_rsi > 40
+tf_core_sell = h1_bear and m15_bear and (ta.crossunder(close, ema_fast_c) or (tf_use_momentum and confirm_sell)) and m15_rsi < 60
+tf_core_buy  = h1_bull and m15_bull and (ta.crossover(close,  ema_fast_c) or (tf_use_momentum and confirm_buy))  and m15_rsi > 40
 
 // ─── SEGNALI ──────────────────────────────────────────────
 // I trade Zone passano anche dal punteggio (score); i Trend-Following no (la
