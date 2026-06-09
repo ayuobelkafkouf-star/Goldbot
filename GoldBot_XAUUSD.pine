@@ -101,15 +101,19 @@ news3_min    = input.int(0,  "Min notizia 3", group="Notizie")
 news_before  = input.int(30, "Minuti prima", group="Notizie")
 news_after   = input.int(30, "Minuti dopo",  group="Notizie")
 
+// ─── TIMEFRAME DI RIFERIMENTO (scala la strategia al tuo grafico) ───
+tf_fast = input.timeframe("15", "Timeframe veloce (riferimento)", group="Timeframe", tooltip="Riferimento 'veloce' per trend/zone/spike. Su grafico M15 lascia 15. Su grafico H1 prova 60.")
+tf_slow = input.timeframe("60", "Timeframe lento (struttura/TP2)", group="Timeframe", tooltip="Riferimento 'lento' per trend di fondo e struttura (TP2). Su grafico M15 lascia 60. Su grafico H1 prova 240 (H4).")
+
 // ─── TIMEFRAME DATA (NO REPAINT) ──────────────────────────
 // Un'unica request.security per timeframe (tupla) invece di una chiamata per
 // serie: stessi identici valori ma molte meno richieste HTF → script più veloce.
 // Manteniamo [1] su ogni sorgente + lookahead_off per evitare il repaint in live.
-[m15_ef, m15_es, m15_rsi, m15_high, m15_low, m15_close, m15_open, m15_atr, m15_ph, m15_pl, m15_struct_high, m15_struct_low] = request.security(syminfo.tickerid, "15",
+[m15_ef, m15_es, m15_rsi, m15_high, m15_low, m15_close, m15_open, m15_atr, m15_ph, m15_pl, m15_struct_high, m15_struct_low] = request.security(syminfo.tickerid, tf_fast,
   [ta.ema(close, m15_fast)[1], ta.ema(close, m15_slow)[1], ta.rsi(close, rsi_len)[1], high[1], low[1], close[1], open[1], ta.atr(14)[1], ta.pivothigh(high, pivot_left, pivot_right)[1], ta.pivotlow(low, pivot_left, pivot_right)[1], ta.highest(high, 20)[1], ta.lowest(low, 20)[1]],
   lookahead=barmerge.lookahead_off)
 
-[h1_ef, h1_es, h1_struct_high, h1_struct_low] = request.security(syminfo.tickerid, "60",
+[h1_ef, h1_es, h1_struct_high, h1_struct_low] = request.security(syminfo.tickerid, tf_slow,
   [ta.ema(close, h1_fast)[1], ta.ema(close, h1_slow)[1], ta.highest(high, 20)[1], ta.lowest(low, 20)[1]],
   lookahead=barmerge.lookahead_off)
 
