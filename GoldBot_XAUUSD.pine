@@ -38,6 +38,11 @@ trail_mult  = input.float(1.5, "Trailing ATR mult", group="Rischio", minval=0.5,
 use_rr      = input.bool(true, "Filtro Risk/Reward minimo", group="Rischio", tooltip="Non entra se il target TP1 è troppo piccolo rispetto allo stop. 1.0 = TP1 almeno pari al rischio. Blocca i trade con SL più largo del target.")
 min_rr      = input.float(1.0, "R:R minimo (TP1/SL)", group="Rischio", minval=0.3, maxval=5.0, step=0.1)
 
+// ─── ENTRATA SU PULLBACK (prezzo migliore, non a metà movimento) ─────
+use_pullback    = input.bool(true, "Entrata su pullback (prezzo migliore)", group="🎯 Entrata", tooltip="Invece di entrare subito a mercato (a metà del movimento), piazza un ordine limite verso il bordo della zona e aspetta che il prezzo torni: entri dal prezzo migliore con SL più stretto e R:R migliore. Se il prezzo non rientra entro le barre di validità, il trade viene saltato.")
+pullback_atr    = input.float(0.6, "Distanza pullback (ATR)", group="🎯 Entrata", minval=0.1, maxval=3.0, step=0.1, tooltip="Quanto mettere l'ordine più indietro rispetto alla candela di conferma. Più alto = prezzo migliore ma meno probabilità che venga riempito.")
+pullback_expiry = input.int(6, "Barre di validità ordine", group="🎯 Entrata", minval=1, maxval=30, tooltip="Se entro queste barre il prezzo non torna al livello, l'ordine viene annullato (trade saltato).")
+
 use_session   = input.bool(true, "Filtro sessione London/NY overlap", group="Filtri")
 session_start = input.int(13, "Sessione start (Roma)", group="Filtri", minval=0, maxval=23)
 session_end   = input.int(17, "Sessione end (Roma)",   group="Filtri", minval=0, maxval=23)
@@ -375,7 +380,73 @@ var box tp1_box = na
 var box tp2_box = na
 var box sl_box  = na
 
-if final_buy
+// ─── ENTRATA SU PULLBACK (ordine limite verso il bordo della zona) ───
+// Non insegue a metà movimento: piazza l'ordine al prezzo migliore e aspetta
+// il ritorno del prezzo (SL più stretto → R:R migliore). Scade dopo N barre.
+var bool  pend_active = false
+var int   pend_dir    = 0
+var int   pend_bar    = 0
+var float pend_limit  = na
+var float pend_slv    = na
+var float pend_tp1v   = na
+var float pend_tp2v   = na
+
+if use_pullback and strategy.position_size == 0 and not pend_active and (final_buy or final_sell)
+    _isbuy = final_buy
+    _lim   = _isbuy ? close - atr_val * pullback_atr : close + atr_val * pullback_atr
+    _slv   = _isbuy ? m15_low - atr_val * eff_sl_atr_mult : m15_high + atr_val * eff_sl_atr_mult
+    _t1    = _isbuy ? m15_struct_high : m15_struct_low
+    _t2    = _isbuy ? h1_struct_high  : h1_struct_low
+    _ok    = _isbuy ? (_slv < _lim and _lim < _t1) : (_slv > _lim and _lim > _t1)
+    if _ok
+        pend_active := true
+        pend_dir    := _isbuy ? 1 : -1
+        pend_bar    := bar_index
+        pend_limit  := _lim
+        pend_slv    := _slv
+        pend_tp1v   := _t1
+        pend_tp2v   := _t2
+
+if use_pullback and pend_active and strategy.position_size == 0
+    if pend_dir == 1
+        strategy.entry("BUY", strategy.long, qty=f_qty(pend_limit - pend_slv), limit=pend_limit)
+        strategy.exit("BUY_EXIT", from_entry="BUY", stop=pend_slv, limit=pend_tp2v)
+    else
+        strategy.entry("SELL", strategy.short, qty=f_qty(pend_slv - pend_limit), limit=pend_limit)
+        strategy.exit("SELL_EXIT", from_entry="SELL", stop=pend_slv, limit=pend_tp2v)
+    if bar_index - pend_bar >= pullback_expiry
+        strategy.cancel("BUY")
+        strategy.cancel("SELL")
+        pend_active := false
+
+if use_pullback and pend_active and strategy.position_size != 0
+    pend_active := false
+    entry_px := strategy.position_avg_price
+    be_active := false
+    last_trade_was_sl := false
+    box.delete(tp1_box), box.delete(tp2_box), box.delete(sl_box)
+    if pend_dir == 1
+        last_buy_bar := bar_index
+        sl_buy  := pend_slv
+        tp1_buy := pend_tp1v
+        tp2_buy := pend_tp2v
+        strategy.exit("BUY_EXIT", from_entry="BUY", stop=sl_buy, limit=tp2_buy)
+        tp2_box := box.new(bar_index, tp1_buy, bar_index+50, tp2_buy, bgcolor=color.new(color.green,50), border_color=color.new(color.green,20))
+        tp1_box := box.new(bar_index, entry_px, bar_index+50, tp1_buy, bgcolor=color.new(color.green,70), border_color=color.new(color.green,40))
+        sl_box  := box.new(bar_index, sl_buy, bar_index+50, entry_px, bgcolor=color.new(color.red,70), border_color=color.new(color.red,30))
+        alert("🟢 GoldBot BUY XAUUSD (pullback)\nEntry: " + str.tostring(entry_px,"#.##") + "\nSL: " + str.tostring(sl_buy,"#.##") + "\nTP1: " + str.tostring(tp1_buy,"#.##") + "\nTP2: " + str.tostring(tp2_buy,"#.##") + "\nMode: " + mode, alert.freq_once_per_bar_close)
+    else
+        last_sell_bar := bar_index
+        sl_sell  := pend_slv
+        tp1_sell := pend_tp1v
+        tp2_sell := pend_tp2v
+        strategy.exit("SELL_EXIT", from_entry="SELL", stop=sl_sell, limit=tp2_sell)
+        tp2_box := box.new(bar_index, tp2_sell, bar_index+50, tp1_sell, bgcolor=color.new(color.green,50), border_color=color.new(color.green,20))
+        tp1_box := box.new(bar_index, tp1_sell, bar_index+50, entry_px, bgcolor=color.new(color.green,70), border_color=color.new(color.green,40))
+        sl_box  := box.new(bar_index, entry_px, bar_index+50, sl_sell, bgcolor=color.new(color.red,70), border_color=color.new(color.red,30))
+        alert("🔴 GoldBot SELL XAUUSD (pullback)\nEntry: " + str.tostring(entry_px,"#.##") + "\nSL: " + str.tostring(sl_sell,"#.##") + "\nTP1: " + str.tostring(tp1_sell,"#.##") + "\nTP2: " + str.tostring(tp2_sell,"#.##") + "\nMode: " + mode, alert.freq_once_per_bar_close)
+
+if not use_pullback and final_buy
     last_buy_bar := bar_index
     sl_buy   := m15_low - atr_val * eff_sl_atr_mult
     tp1_buy  := m15_struct_high
@@ -398,7 +469,7 @@ if final_buy
           "\nScore: "  + str.tostring(score_buy) +
           "\nMode: "   + mode, alert.freq_once_per_bar_close)
 
-if final_sell
+if not use_pullback and final_sell
     last_sell_bar := bar_index
     sl_sell  := m15_high + atr_val * eff_sl_atr_mult
     tp1_sell := m15_struct_low
@@ -489,6 +560,7 @@ if barstate.islast and show_debug
     streak_txt = loss_streak > 0 ? "−" + str.tostring(loss_streak) : win_streak > 0 ? "+" + str.tostring(win_streak) : "0"
     common := common + (use_adaptive ? "🧠" : "⚪") + " Adattivo streak " + streak_txt + " → score≥" + str.tostring(adapt_score_eff) + " R:R≥" + str.tostring(math.round(adapt_min_rr,2)) + "\n"
     common := common + "   WR recenti: BUY " + (na(adp_buy_wr) ? "n/d" : str.tostring(math.round(adp_buy_wr)) + "%" + (buy_pen > 0 ? " 🔻" : "")) + " | SELL " + (na(adp_sell_wr) ? "n/d" : str.tostring(math.round(adp_sell_wr)) + "%" + (sell_pen > 0 ? " 🔻" : "")) + "\n"
+    common := common + (use_pullback and pend_active ? "⏳ Ordine pullback " + (pend_dir == 1 ? "BUY" : "SELL") + " @ " + str.tostring(math.round(pend_limit,2)) + " (scade " + str.tostring(math.max(0, pullback_expiry - (bar_index - pend_bar))) + "b)\n" : "")
     flat = strategy.position_size == 0
     pos_status = flat ? "✅ Flat (può entrare)" : "❌ Posizione aperta"
     title = final_buy ? "🟢 ENTRATA BUY!" : final_sell ? "🔴 ENTRATA SELL!" : "⏸️ NESSUNA ENTRATA"
