@@ -41,7 +41,8 @@ min_rr      = input.float(1.0, "R:R minimo (TP1/SL)", group="Rischio", minval=0.
 // ─── ENTRATA SU PULLBACK (prezzo migliore, non a metà movimento) ─────
 use_pullback    = input.bool(true, "Entrata su pullback (prezzo migliore)", group="🎯 Entrata", tooltip="Invece di entrare subito a mercato (a metà del movimento), piazza un ordine limite verso il bordo della zona e aspetta che il prezzo torni: entri dal prezzo migliore con SL più stretto e R:R migliore. Se il prezzo non rientra entro le barre di validità, il trade viene saltato.")
 pullback_atr    = input.float(0.6, "Distanza pullback (ATR)", group="🎯 Entrata", minval=0.1, maxval=3.0, step=0.1, tooltip="Quanto mettere l'ordine più indietro rispetto alla candela di conferma. Più alto = prezzo migliore ma meno probabilità che venga riempito.")
-pullback_expiry = input.int(6, "Barre di validità ordine", group="🎯 Entrata", minval=1, maxval=30, tooltip="Se entro queste barre il prezzo non torna al livello, l'ordine viene annullato (trade saltato).")
+pullback_expiry = input.int(6, "Barre di validità ordine", group="🎯 Entrata", minval=1, maxval=30, tooltip="Se entro queste barre il prezzo non torna al livello, l'ordine viene annullato.")
+pullback_fallback = input.bool(true, "Ibrido: entra a mercato se non si riempie", group="🎯 Entrata", tooltip="Se entro le barre di validità il prezzo non torna al livello, entra comunque a mercato (con SL/TP ricalcolati al prezzo attuale). Così non perdi i movimenti forti che non fanno pullback.")
 
 use_session   = input.bool(true, "Filtro sessione London/NY overlap", group="Filtri")
 session_start = input.int(13, "Sessione start (Roma)", group="Filtri", minval=0, maxval=23)
@@ -408,16 +409,40 @@ if use_pullback and strategy.position_size == 0 and not pend_active and (final_b
         pend_tp2v   := _t2
 
 if use_pullback and pend_active and strategy.position_size == 0
-    if pend_dir == 1
-        strategy.entry("BUY", strategy.long, qty=f_qty(pend_limit - pend_slv), limit=pend_limit)
-        strategy.exit("BUY_EXIT", from_entry="BUY", stop=pend_slv, limit=pend_tp2v)
+    _expired = bar_index - pend_bar >= pullback_expiry
+    if not _expired
+        // Finché valido: mantieni l'ordine limite al prezzo migliore
+        if pend_dir == 1
+            strategy.entry("BUY", strategy.long, qty=f_qty(pend_limit - pend_slv), limit=pend_limit)
+            strategy.exit("BUY_EXIT", from_entry="BUY", stop=pend_slv, limit=pend_tp2v)
+        else
+            strategy.entry("SELL", strategy.short, qty=f_qty(pend_slv - pend_limit), limit=pend_limit)
+            strategy.exit("SELL_EXIT", from_entry="SELL", stop=pend_slv, limit=pend_tp2v)
     else
-        strategy.entry("SELL", strategy.short, qty=f_qty(pend_slv - pend_limit), limit=pend_limit)
-        strategy.exit("SELL_EXIT", from_entry="SELL", stop=pend_slv, limit=pend_tp2v)
-    if bar_index - pend_bar >= pullback_expiry
+        // Scaduto: annulla l'ordine limite
         strategy.cancel("BUY")
         strategy.cancel("SELL")
-        pend_active := false
+        if pullback_fallback and pend_dir == 1
+            // Ibrido: entra a mercato con livelli ricalcolati al prezzo attuale
+            pend_slv  := m15_low - atr_val * eff_sl_atr_mult
+            pend_tp1v := m15_struct_high
+            pend_tp2v := h1_struct_high
+            if pend_slv < close and close < pend_tp1v
+                strategy.entry("BUY", strategy.long, qty=f_qty(close - pend_slv))
+                strategy.exit("BUY_EXIT", from_entry="BUY", stop=pend_slv, limit=pend_tp2v)
+            else
+                pend_active := false
+        else if pullback_fallback and pend_dir == -1
+            pend_slv  := m15_high + atr_val * eff_sl_atr_mult
+            pend_tp1v := m15_struct_low
+            pend_tp2v := h1_struct_low
+            if pend_slv > close and close > pend_tp1v
+                strategy.entry("SELL", strategy.short, qty=f_qty(pend_slv - close))
+                strategy.exit("SELL_EXIT", from_entry="SELL", stop=pend_slv, limit=pend_tp2v)
+            else
+                pend_active := false
+        else
+            pend_active := false
 
 if use_pullback and pend_active and strategy.position_size != 0
     pend_active := false
