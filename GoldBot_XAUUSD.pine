@@ -15,6 +15,7 @@ min_score       = input.int(60, "Score minimo per trade", group="Modalità", min
 max_zones       = input.int(5, "Zone attive max per lato", group="Modalità", minval=1, maxval=10)
 strategy_type   = input.string("Trend-Following", "Tipo strategia", options=["Zone (retest)", "Trend-Following", "Entrambe"], group="Modalità", tooltip="Zone: aspetta il rimbalzo in supply/demand. Trend-Following: segue il trend (entra quando il prezzo rientra sulla EMA veloce e riparte nel verso del trend) → prende i movimenti dritti. Entrambe: usa tutti e due (più entrate).")
 tf_use_momentum = input.bool(true, "TF: entra anche su spike di conferma (oltre EMA)", group="Modalità", tooltip="In Trend-Following, oltre al rientro sulla EMA, entra nel verso del trend anche sulle candele di conferma (spike). Cattura i movimenti dritti dove la EMA non incrocia → più entrate. Disattivalo per tornare al solo incrocio EMA.")
+tf_max_ext      = input.float(1.5, "TF: distanza max dalla EMA (ATR)", group="Modalità", minval=0.5, maxval=5.0, step=0.25, tooltip="Anti-inseguimento: se il prezzo è già scappato oltre questa distanza dalla EMA veloce, il movimento è esteso e il bot NON entra (entrare lì = comprare il massimo / vendere il minimo dello spike, poi il rimbalzo becca lo stop). Più basso = più severo.")
 
 h1_fast  = input.int(21, "H1 EMA veloce", group="Trend H1")
 h1_slow  = input.int(55, "H1 EMA lenta",  group="Trend H1")
@@ -34,6 +35,7 @@ body_mult   = input.float(0.3, "Body conferma minimo ATR", group="Spike", minval
 
 risk_pct    = input.float(0.5, "Rischio % per trade", group="Rischio", minval=0.1, maxval=3.0, step=0.1)
 sl_atr_mult = input.float(0.6, "SL buffer ATR", group="Rischio", minval=0.1, maxval=2.0, step=0.1)
+sl_swing_len = input.int(3, "Barre swing per SL (sul grafico)", group="Rischio", minval=1, maxval=20, tooltip="Lo SL va oltre il minimo/massimo delle ultime N candele DEL GRAFICO (+ buffer ATR). Prima era ancorato alla candela M15: sul grafico H1 risultava troppo stretto e veniva preso dal semplice rumore. Ora lo stop si scala da solo al timeframe che usi.")
 tp1_pct     = input.float(80,  "% chiusura TP1", group="Rischio", minval=10, maxval=90)
 use_quick_tp = input.bool(true, "TP rapido a R fisso (alza win rate)", group="Rischio", tooltip="Mette TP1 a un multiplo fisso del rischio (es. 1R) invece che sulla struttura: target più vicino, colpito più spesso → win rate più alto (ma vincite più piccole). Il restante % corre verso TP2.")
 tp1_r        = input.float(1.4, "TP1 in multipli di rischio (R)", group="Rischio", minval=0.3, maxval=5.0, step=0.1)
@@ -63,7 +65,7 @@ pause_days   = input.int(3,    "Giorni pausa dopo trigger", group="Protezione", 
 
 // ─── ANTI-WHIPSAW (3 protezioni aggiuntive) ─────
 use_adx          = input.bool(true, "Filtro ADX (entra solo in trend forte)", group="Anti-Whipsaw", tooltip="ADX misura la forza del trend. Sotto soglia il trend è debole/incerto e il bot non entra.")
-adx_threshold    = input.float(24.0, "Soglia ADX minima", group="Anti-Whipsaw", minval=10.0, maxval=50.0, step=1.0)
+adx_threshold    = input.float(28.0, "Soglia ADX minima", group="Anti-Whipsaw", minval=10.0, maxval=50.0, step=1.0)
 use_smart_cd     = input.bool(true, "Cooldown esteso dopo stop loss", group="Anti-Whipsaw", tooltip="Dopo uno stop loss, aspetta più barre prima di rientrare. Evita doppi stop nelle inversioni-trappola.")
 post_sl_cooldown = input.int(10, "Barre cooldown dopo SL", group="Anti-Whipsaw", minval=1, maxval=50)
 use_adaptive_sl  = input.bool(true, "Stop loss adattivo alla volatilità", group="Anti-Whipsaw", tooltip="In giornate di alta volatilità lo SL si allarga automaticamente per evitare stop hunting.")
@@ -119,6 +121,12 @@ tf_slow = input.timeframe("60", "Timeframe lento (struttura/TP2)", group="Timefr
   lookahead=barmerge.lookahead_off)
 
 atr_val    = ta.atr(14)
+
+// ─── ANCORE SL SUL GRAFICO ────────────────────────────────
+// Lo stop si appoggia allo swing delle ultime N candele del grafico corrente,
+// così la distanza dello SL è proporzionata al timeframe su cui gira il bot.
+sl_low_anchor  = ta.lowest(low,   sl_swing_len)
+sl_high_anchor = ta.highest(high, sl_swing_len)
 
 // ─── TREND ────────────────────────────────────────────────
 h1_bull  = h1_ef > h1_es
@@ -359,8 +367,8 @@ score_ok_buy  = score_buy  >= (adapt_score_eff + buy_pen)
 // ─── FILTRO RISK/REWARD ───────────────────────────────────
 // Stessa formula SL/TP degli ingressi (incl. SL adattivo): scarta i setup
 // dove il target TP1 è troppo piccolo rispetto allo stop (es. SL > target).
-rr_risk_buy  = close - (m15_low  - atr_val * eff_sl_atr_mult)
-rr_risk_sell = (m15_high + atr_val * eff_sl_atr_mult) - close
+rr_risk_buy  = close - (sl_low_anchor  - atr_val * eff_sl_atr_mult)
+rr_risk_sell = (sl_high_anchor + atr_val * eff_sl_atr_mult) - close
 rr_buy   = rr_risk_buy  > 0 ? (m15_struct_high - close) / rr_risk_buy  : 0.0
 rr_sell  = rr_risk_sell > 0 ? (close - m15_struct_low)  / rr_risk_sell : 0.0
 rr_ok_buy  = not use_rr or use_quick_tp or rr_buy  >= adapt_min_rr
@@ -374,8 +382,12 @@ zone_core_sell = confirm_sell and price_at_supply and h1_bear and m15_bear and r
 zone_core_buy  = confirm_buy  and price_at_demand and h1_bull and m15_bull and rsi_ok_buy
 // TREND-FOLLOWING: nel verso del trend, rientro sulla EMA veloce e ripartenza
 ema_fast_c   = ta.ema(close, m15_fast)
-tf_core_sell = h1_bear and m15_bear and (ta.crossunder(close, ema_fast_c) or (tf_use_momentum and confirm_sell)) and m15_rsi < 60
-tf_core_buy  = h1_bull and m15_bull and (ta.crossover(close,  ema_fast_c) or (tf_use_momentum and confirm_buy))  and m15_rsi > 40
+// Anti-inseguimento: se il prezzo è già oltre tf_max_ext ATR dalla EMA, il
+// movimento è esteso → entrare ora = vendere il minimo / comprare il massimo.
+tf_not_ext_sell = (ema_fast_c - close) <= atr_val * tf_max_ext
+tf_not_ext_buy  = (close - ema_fast_c) <= atr_val * tf_max_ext
+tf_core_sell = h1_bear and m15_bear and (ta.crossunder(close, ema_fast_c) or (tf_use_momentum and confirm_sell)) and m15_rsi < 60 and tf_not_ext_sell
+tf_core_buy  = h1_bull and m15_bull and (ta.crossover(close,  ema_fast_c) or (tf_use_momentum and confirm_buy))  and m15_rsi > 40 and tf_not_ext_buy
 
 // ─── SEGNALI ──────────────────────────────────────────────
 // I trade Zone passano anche dal punteggio (score); i Trend-Following no (la
@@ -419,7 +431,7 @@ var float pend_tp2v   = na
 if use_pullback and strategy.position_size == 0 and not pend_active and (final_buy or final_sell)
     _isbuy = final_buy
     _lim   = _isbuy ? close - atr_val * pullback_atr : close + atr_val * pullback_atr
-    _slv   = _isbuy ? m15_low - atr_val * eff_sl_atr_mult : m15_high + atr_val * eff_sl_atr_mult
+    _slv   = _isbuy ? sl_low_anchor - atr_val * eff_sl_atr_mult : sl_high_anchor + atr_val * eff_sl_atr_mult
     _t1    = use_quick_tp ? (_isbuy ? _lim + tp1_r * (_lim - _slv) : _lim - tp1_r * (_slv - _lim)) : (_isbuy ? m15_struct_high : m15_struct_low)
     _t2    = _isbuy ? h1_struct_high  : h1_struct_low
     _ok    = _isbuy ? (_slv < _lim and _lim < _t1) : (_slv > _lim and _lim > _t1)
@@ -452,7 +464,7 @@ if use_pullback and pend_active and strategy.position_size == 0
         strategy.cancel("SELL")
         if pullback_fallback and pend_dir == 1
             // Ibrido: entra a mercato con livelli ricalcolati al prezzo attuale
-            pend_slv  := m15_low - atr_val * eff_sl_atr_mult
+            pend_slv  := sl_low_anchor - atr_val * eff_sl_atr_mult
             pend_tp1v := use_quick_tp ? close + tp1_r * (close - pend_slv) : m15_struct_high
             pend_tp2v := h1_struct_high
             if pend_slv < close and close < pend_tp1v
@@ -461,7 +473,7 @@ if use_pullback and pend_active and strategy.position_size == 0
             else
                 pend_active := false
         else if pullback_fallback and pend_dir == -1
-            pend_slv  := m15_high + atr_val * eff_sl_atr_mult
+            pend_slv  := sl_high_anchor + atr_val * eff_sl_atr_mult
             pend_tp1v := use_quick_tp ? close - tp1_r * (pend_slv - close) : m15_struct_low
             pend_tp2v := h1_struct_low
             if pend_slv > close and close > pend_tp1v
@@ -501,7 +513,7 @@ if use_pullback and pend_active and strategy.position_size != 0
 
 if not use_pullback and final_buy
     last_buy_bar := bar_index
-    sl_buy   := m15_low - atr_val * eff_sl_atr_mult
+    sl_buy   := sl_low_anchor - atr_val * eff_sl_atr_mult
     tp1_buy  := use_quick_tp ? close + tp1_r * (close - sl_buy) : m15_struct_high
     tp2_buy  := h1_struct_high
     entry_px := close
@@ -524,7 +536,7 @@ if not use_pullback and final_buy
 
 if not use_pullback and final_sell
     last_sell_bar := bar_index
-    sl_sell  := m15_high + atr_val * eff_sl_atr_mult
+    sl_sell  := sl_high_anchor + atr_val * eff_sl_atr_mult
     tp1_sell := use_quick_tp ? close - tp1_r * (sl_sell - close) : m15_struct_low
     tp2_sell := h1_struct_low
     entry_px := close
@@ -627,10 +639,10 @@ plot(h1_es,  "EMA55 H1",  color=color.new(color.purple, 40), linewidth=2, displa
 plot(m15_ef, "EMA21 M15", color=color.new(color.aqua,   40), linewidth=1, display=display.none)
 plot(m15_es, "EMA55 M15", color=color.new(color.orange, 40), linewidth=1, display=display.none)
 
-plot_sl_buy_v   = final_buy  ? m15_low  - atr_val * eff_sl_atr_mult : na
+plot_sl_buy_v   = final_buy  ? sl_low_anchor  - atr_val * eff_sl_atr_mult : na
 plot_tp1_buy_v  = final_buy  ? m15_struct_high : na
 plot_tp2_buy_v  = final_buy  ? h1_struct_high  : na
-plot_sl_sell_v  = final_sell ? m15_high + atr_val * eff_sl_atr_mult : na
+plot_sl_sell_v  = final_sell ? sl_high_anchor + atr_val * eff_sl_atr_mult : na
 plot_tp1_sell_v = final_sell ? m15_struct_low  : na
 plot_tp2_sell_v = final_sell ? h1_struct_low   : na
 plot(plot_sl_buy_v,   "SL Buy",     display=display.none)
