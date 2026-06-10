@@ -91,6 +91,13 @@ max_trades_day = input.int(5, "Max trade giorno", group="Filtri")
 max_loss   = input.float(1.0, "Max perdita % giorno", group="Filtri")
 max_profit = input.float(5.0, "Max profitto % giorno", group="Filtri")
 
+// ─── MODALITÀ LIBERA (nessun freno di frequenza) ─────
+// Toglie SOLO i freni che limitano QUANDO/QUANTE volte operare: cooldown tra i
+// trade, limite trade/giorno, stop P&L giornaliero e circuit breaker drawdown.
+// Resta un trade alla volta e restano TUTTI i filtri di qualità del segnale
+// (trend, ADX, RSI, zone, R:R, notizie). Operazioni multiple: più avanti su richiesta.
+free_mode = input.bool(true, "🚀 Modalità libera (togli i freni: cooldown, max trade/g, stop giorno, circuit breaker)", group="Filtri", tooltip="ON = il bot opera ogni volta che il segnale è valido, senza aspettare il cooldown e senza limiti giornalieri. Resta comunque UN SOLO trade alla volta e tutti i filtri di qualità (trend, ADX, RSI, R:R, notizie) restano attivi. OFF = ripristina tutti i freni di sicurezza.")
+
 use_news     = input.bool(true, "Filtro notizie", group="Notizie")
 news1_active = input.bool(true,  "NFP/CPI 1", group="Notizie")
 news1_hour   = input.int(14, "Ora notizia 1", group="Notizie")
@@ -316,14 +323,14 @@ buy_pen  = use_adaptive and adp_buy_n  >= adapt_min_samples and adp_buy_wr  < ad
 sell_pen = use_adaptive and adp_sell_n >= adapt_min_samples and adp_sell_wr < adapt_weak_wr ? adapt_side_penalty : 0
 
 extended_cd = (use_smart_cd and last_trade_was_sl ? math.max(eff_cooldown_bars, post_sl_cooldown) : eff_cooldown_bars) + adapt_cd_extra
-cooldown_ok = (bar_index - last_close_bar) >= extended_cd
-trades_ok   = not enable_max_trades or trades_today < eff_max_trades
+cooldown_ok = free_mode or (bar_index - last_close_bar) >= extended_cd
+trades_ok   = free_mode or not enable_max_trades or trades_today < eff_max_trades
 
 var float day_eq = na
 if new_day or na(day_eq)
     day_eq := strategy.equity
 day_pct = (strategy.equity - day_eq) / day_eq * 100
-day_ok  = day_pct > -max_loss and day_pct < max_profit
+day_ok  = free_mode or (day_pct > -max_loss and day_pct < max_profit)
 
 // ─── CIRCUIT BREAKER DRAWDOWN ─────────────────────────────
 var float eq_peak       = na
@@ -336,7 +343,7 @@ if na(eq_peak) or strategy.equity > eq_peak
 dd_pct = eq_peak > 0 ? (eq_peak - strategy.equity) / eq_peak * 100 : 0.0
 if use_circuit and dd_pct >= dd_threshold and day_counter >= pause_until_d
     pause_until_d := day_counter + pause_days
-circuit_ok = not use_circuit or day_counter >= pause_until_d
+circuit_ok = free_mode or not use_circuit or day_counter >= pause_until_d
 pause_left = math.max(0, pause_until_d - day_counter)
 
 // ─── PROBABILITÀ SETUP ────────────────────────────────────
