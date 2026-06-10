@@ -17,6 +17,8 @@ max_zones       = input.int(5, "Zone attive max per lato", group="Modalità", mi
 strategy_type   = input.string("Trend-Following", "Tipo strategia", options=["Zone (retest)", "Trend-Following", "Entrambe"], group="Modalità", tooltip="Zone: aspetta il rimbalzo in supply/demand. Trend-Following: segue il trend (entra quando il prezzo rientra sulla EMA veloce e riparte nel verso del trend) → prende i movimenti dritti. Entrambe: usa tutti e due (più entrate).")
 tf_use_momentum = input.bool(true, "TF: entra anche su spike di conferma (oltre EMA)", group="Modalità", tooltip="In Trend-Following, oltre al rientro sulla EMA, entra nel verso del trend anche sulle candele di conferma (spike). Cattura i movimenti dritti dove la EMA non incrocia → più entrate. Disattivalo per tornare al solo incrocio EMA.")
 tf_max_ext      = input.float(1.5, "TF: distanza max dalla EMA (ATR)", group="Modalità", minval=0.5, maxval=5.0, step=0.25, tooltip="Anti-inseguimento: se il prezzo è già scappato oltre questa distanza dalla EMA veloce, il movimento è esteso e il bot NON entra (entrare lì = comprare il massimo / vendere il minimo dello spike, poi il rimbalzo becca lo stop). Più basso = più severo.")
+use_sweep       = input.bool(true, "🎯 Entrata su sweep di liquidità (stile SMC)", group="Modalità", tooltip="Stile Smart Money: il bot entra quando il prezzo ROMPE un massimo/minimo recente (prende gli stop loss della gente = 'liquidità') e poi RIENTRA chiudendo dall'altra parte (la trappola/inversione). Entra nel verso del trend H1: sweep di un minimo in uptrend = BUY, sweep di un massimo in downtrend = SELL. Lo stop finisce naturalmente oltre il punto spazzato.")
+sweep_lookback  = input.int(10, "Sweep: barre del max/min da spazzare", group="Modalità", minval=3, maxval=50, tooltip="Quante candele indietro guardare per il massimo/minimo che deve essere 'spazzato'. Più alto = sweep di livelli più importanti (meno entrate ma più significative).")
 
 h1_fast  = input.int(21, "H1 EMA veloce", group="Trend H1")
 h1_slow  = input.int(55, "H1 EMA lenta",  group="Trend H1")
@@ -400,6 +402,14 @@ tf_not_ext_sell = (ema_fast_c - close) <= atr_val * tf_max_ext
 tf_not_ext_buy  = (close - ema_fast_c) <= atr_val * tf_max_ext
 tf_core_sell = h1_bear and m15_bear and (ta.crossunder(close, ema_fast_c) or (tf_use_momentum and confirm_sell)) and m15_rsi < 60 and tf_not_ext_sell
 tf_core_buy  = h1_bull and m15_bull and (ta.crossover(close,  ema_fast_c) or (tf_use_momentum and confirm_buy))  and m15_rsi > 40 and tf_not_ext_buy
+// SWEEP DI LIQUIDITÀ (SMC): il prezzo rompe il max/min recente (prende gli stop)
+// e RIENTRA chiudendo dall'altra parte → trappola. Entra nel verso del trend H1.
+prev_swing_high = ta.highest(high, sweep_lookback)[1]
+prev_swing_low  = ta.lowest(low,   sweep_lookback)[1]
+swept_high = high > prev_swing_high and close < prev_swing_high   // wick sopra, rientro = liquidità presa in alto
+swept_low  = low  < prev_swing_low  and close > prev_swing_low    // wick sotto, rientro = liquidità presa in basso
+sweep_core_sell = h1_bear and swept_high and m15_rsi < 65
+sweep_core_buy  = h1_bull and swept_low  and m15_rsi > 35
 
 // ─── SEGNALI ──────────────────────────────────────────────
 // I trade Zone passano anche dal punteggio (score); i Trend-Following no (la
@@ -409,9 +419,9 @@ common_ok = hour_ok and atr_ok and adx_ok and news_ok and cooldown_ok and trades
 // (non può tenere long e short insieme); altrimenti un solo trade alla volta.
 can_open_buy  = multi_mode ? (strategy.position_size >= 0 and strategy.opentrades < max_open) : strategy.position_size == 0
 can_open_sell = multi_mode ? (strategy.position_size <= 0 and strategy.opentrades < max_open) : strategy.position_size == 0
-final_sell = ((use_zone and zone_core_sell and score_ok_sell) or (use_tf and tf_core_sell)) and rr_ok_sell and common_ok and can_open_sell
+final_sell = ((use_zone and zone_core_sell and score_ok_sell) or (use_tf and tf_core_sell) or (use_sweep and sweep_core_sell)) and rr_ok_sell and common_ok and can_open_sell
 
-final_buy  = ((use_zone and zone_core_buy and score_ok_buy) or (use_tf and tf_core_buy)) and rr_ok_buy and common_ok and can_open_buy
+final_buy  = ((use_zone and zone_core_buy and score_ok_buy) or (use_tf and tf_core_buy) or (use_sweep and sweep_core_buy)) and rr_ok_buy and common_ok and can_open_buy
 
 // ─── POSITION SIZING DINAMICO ─────────────────────────────
 f_qty(_sl_dist) =>
@@ -649,7 +659,8 @@ if barstate.islast and show_debug
     common := common + (use_adaptive ? "🧠" : "⚪") + " Adattivo streak " + streak_txt + " → score≥" + str.tostring(adapt_score_eff) + " R:R≥" + str.tostring(math.round(adapt_min_rr,2)) + "\n"
     common := common + "   WR recenti: BUY " + (na(adp_buy_wr) ? "n/d" : str.tostring(math.round(adp_buy_wr)) + "%" + (buy_pen > 0 ? " 🔻" : "")) + " | SELL " + (na(adp_sell_wr) ? "n/d" : str.tostring(math.round(adp_sell_wr)) + "%" + (sell_pen > 0 ? " 🔻" : "")) + "\n"
     common := common + (use_pullback and pend_active ? "⏳ Ordine pullback " + (pend_dir == 1 ? "BUY" : "SELL") + " @ " + str.tostring(math.round(pend_limit,2)) + " (scade " + str.tostring(math.max(0, pullback_expiry - (bar_index - pend_bar))) + "b)\n" : "")
-    common := common + "🎯 " + strategy_type + (use_tf ? " | TF: BUY " + (tf_core_buy ? "✅" : "❌") + " SELL " + (tf_core_sell ? "✅" : "❌") : "") + "\n"
+    common := common + "🎯 " + strategy_type + (use_tf ? " | TF: BUY " + (tf_core_buy ? "✅" : "❌") + " SELL " + (tf_core_sell ? "✅" : "❌") : "") + (multi_mode ? " | ♾️ " + str.tostring(strategy.opentrades) + "/" + str.tostring(max_open) : "") + "\n"
+    common := common + (use_sweep ? "💧 Sweep: BUY " + (sweep_core_buy ? "✅" : "❌") + " SELL " + (sweep_core_sell ? "✅" : "❌") + "\n" : "")
     flat = strategy.position_size == 0
     pos_status = flat ? "✅ Flat (può entrare)" : "❌ Posizione aperta"
     title = final_buy ? "🟢 ENTRATA BUY!" : final_sell ? "🔴 ENTRATA SELL!" : "⏸️ NESSUNA ENTRATA"
@@ -709,7 +720,7 @@ supply_display = sup_count > 0 ? str.tostring(sup_count) + " attive (ultima: " +
 demand_display = dem_count > 0 ? str.tostring(dem_count) + " attive (ultima: " + str.tostring(math.round(array.get(dem_bots, dem_count-1),2)) + "-" + str.tostring(math.round(array.get(dem_tops, dem_count-1),2)) + ")" : "─"
 
 if barstate.islast
-    mode_badge = (is_quality_24h ? " 💎" : is_aggressive ? " ⚡" : is_extended ? " 🕐" : "") + (use_adaptive ? " 🧠" : "")
+    mode_badge = (is_quality_24h ? " 💎" : is_aggressive ? " ⚡" : is_extended ? " 🕐" : "") + (use_adaptive ? " 🧠" : "") + (multi_mode ? " ♾️" : "")
     table.cell(t, 0, 0,  "GoldBot v5.2" + mode_badge,  text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.black,50))
     table.cell(t, 0, 1,  "H1 Trend",      text_color=color.gray, text_size=size.tiny)
     table.cell(t, 1, 1,  h1_bull ? "RIALZISTA ▲" : "RIBASSISTA ▼", text_color=h1_bull ? color.lime : color.red, text_size=size.tiny)
