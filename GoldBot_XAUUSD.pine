@@ -443,12 +443,14 @@ var float pend_limit  = na
 var float pend_slv    = na
 var float pend_tp1v   = na
 var float pend_tp2v   = na
+var int   pend_open0  = 0
 
-// In multi-mode l'entrata su pullback (un ordine in attesa alla volta) non è
-// compatibile coi trade sovrapposti → si usano entrate a mercato.
-eff_use_pullback = use_pullback and not multi_mode
+// Pullback attivo ANCHE con i trade multipli: un ordine in attesa alla volta,
+// che però può impilarsi sulle posizioni già aperte (fino a max_open). Il
+// riempimento si rileva dall'aumento dei trade aperti, non dalla posizione piatta.
+eff_use_pullback = use_pullback
 
-if eff_use_pullback and strategy.position_size == 0 and not pend_active and (final_buy or final_sell)
+if eff_use_pullback and not pend_active and (final_buy or final_sell)
     _isbuy = final_buy
     _lim   = _isbuy ? close - atr_val * pullback_atr : close + atr_val * pullback_atr
     _slv   = _isbuy ? sl_low_anchor - atr_val * eff_sl_atr_mult : sl_high_anchor + atr_val * eff_sl_atr_mult
@@ -457,6 +459,7 @@ if eff_use_pullback and strategy.position_size == 0 and not pend_active and (fin
     _ok    = _isbuy ? (_slv < _lim and _lim < _t1) : (_slv > _lim and _lim > _t1)
     if _ok
         pend_active := true
+        pend_open0  := strategy.opentrades
         pend_dir    := _isbuy ? 1 : -1
         pend_bar    := bar_index
         pend_limit  := _lim
@@ -468,7 +471,7 @@ if eff_use_pullback and strategy.position_size == 0 and not pend_active and (fin
             line.new(bar_index, _lim, bar_index + pullback_expiry, _lim, color=_pc, style=line.style_dashed, width=1)
             label.new(bar_index, _lim, "⏳ " + (_isbuy ? "BUY" : "SELL") + " " + str.tostring(math.round(_lim, 2)), style=_isbuy ? label.style_label_up : label.style_label_down, color=color.new(_pc, 75), textcolor=_pc, size=size.tiny)
 
-if eff_use_pullback and pend_active and strategy.position_size == 0
+if eff_use_pullback and pend_active and strategy.opentrades <= pend_open0
     _expired = bar_index - pend_bar >= pullback_expiry
     if not _expired
         // Finché valido: mantieni l'ordine limite al prezzo migliore
@@ -504,7 +507,7 @@ if eff_use_pullback and pend_active and strategy.position_size == 0
         else
             pend_active := false
 
-if eff_use_pullback and pend_active and strategy.position_size != 0
+if eff_use_pullback and pend_active and strategy.opentrades > pend_open0
     pend_active := false
     entry_px := strategy.position_avg_price
     be_active := false
