@@ -4,6 +4,7 @@ strategy("GoldBot XAUUSD v5.2", shorttitle="GoldBot v5.2", overlay=true,
   commission_type=strategy.commission.cash_per_contract, commission_value=0.35,
   slippage=5, margin_long=100, margin_short=100,
   calc_on_every_tick=false, process_orders_on_close=true,
+  pyramiding=20,
   max_lines_count=500, max_labels_count=500, max_boxes_count=500)
 
 // ─── INPUTS ───────────────────────────────────────────────
@@ -96,7 +97,11 @@ max_profit = input.float(5.0, "Max profitto % giorno", group="Filtri")
 // trade, limite trade/giorno, stop P&L giornaliero e circuit breaker drawdown.
 // Resta un trade alla volta e restano TUTTI i filtri di qualità del segnale
 // (trend, ADX, RSI, zone, R:R, notizie). Operazioni multiple: più avanti su richiesta.
-free_mode = input.bool(true, "🚀 Modalità libera (togli i freni: cooldown, max trade/g, stop giorno, circuit breaker)", group="Filtri", tooltip="ON = il bot opera ogni volta che il segnale è valido, senza aspettare il cooldown e senza limiti giornalieri. Resta comunque UN SOLO trade alla volta e tutti i filtri di qualità (trend, ADX, RSI, R:R, notizie) restano attivi. OFF = ripristina tutti i freni di sicurezza.")
+free_mode = input.bool(true, "🚀 Modalità libera (togli i freni: cooldown, max trade/g, stop giorno, circuit breaker)", group="Filtri", tooltip="ON = il bot opera ogni volta che il segnale è valido, senza aspettare il cooldown e senza limiti giornalieri. Tutti i filtri di qualità (trend, ADX, RSI, R:R, notizie) restano attivi. OFF = ripristina tutti i freni di sicurezza.")
+
+// ─── TRADE MULTIPLI (più posizioni aperte insieme) ─────
+multi_mode = input.bool(true, "♾️ Trade multipli (apre un altro trade mentre il precedente è aperto)", group="Filtri", tooltip="ON = il bot può aprire più trade SOVRAPPOSTI, fino al numero massimo qui sotto. ⚠️ Nota tecnica di TradingView: una strategia non può essere LONG e SHORT insieme — i trade multipli sono SOLO nella stessa direzione (aggiunge nel verso del trend). Un segnale opposto non apre un trade contrario finché la posizione è aperta. ⚠️ RISCHIO: ogni trade rischia il suo % → 3 trade = ~3 volte il rischio. OFF = un solo trade alla volta.")
+max_open   = input.int(3, "Max trade aperti insieme", group="Filtri", minval=1, maxval=20, tooltip="Quanti trade può tenere aperti contemporaneamente (solo se Trade multipli è ON).")
 
 use_news     = input.bool(true, "Filtro notizie", group="Notizie")
 news1_active = input.bool(true,  "NFP/CPI 1", group="Notizie")
@@ -399,10 +404,14 @@ tf_core_buy  = h1_bull and m15_bull and (ta.crossover(close,  ema_fast_c) or (tf
 // ─── SEGNALI ──────────────────────────────────────────────
 // I trade Zone passano anche dal punteggio (score); i Trend-Following no (la
 // qualità è data dall'allineamento di trend). Tutti passano da R:R e filtri comuni.
-common_ok = hour_ok and atr_ok and adx_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and strategy.position_size == 0
-final_sell = ((use_zone and zone_core_sell and score_ok_sell) or (use_tf and tf_core_sell)) and rr_ok_sell and common_ok
+common_ok = hour_ok and atr_ok and adx_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok
+// Gate posizione: in multi-mode aggiunge nello stesso verso fino a max_open
+// (non può tenere long e short insieme); altrimenti un solo trade alla volta.
+can_open_buy  = multi_mode ? (strategy.position_size >= 0 and strategy.opentrades < max_open) : strategy.position_size == 0
+can_open_sell = multi_mode ? (strategy.position_size <= 0 and strategy.opentrades < max_open) : strategy.position_size == 0
+final_sell = ((use_zone and zone_core_sell and score_ok_sell) or (use_tf and tf_core_sell)) and rr_ok_sell and common_ok and can_open_sell
 
-final_buy  = ((use_zone and zone_core_buy and score_ok_buy) or (use_tf and tf_core_buy)) and rr_ok_buy and common_ok
+final_buy  = ((use_zone and zone_core_buy and score_ok_buy) or (use_tf and tf_core_buy)) and rr_ok_buy and common_ok and can_open_buy
 
 // ─── POSITION SIZING DINAMICO ─────────────────────────────
 f_qty(_sl_dist) =>
@@ -435,7 +444,11 @@ var float pend_slv    = na
 var float pend_tp1v   = na
 var float pend_tp2v   = na
 
-if use_pullback and strategy.position_size == 0 and not pend_active and (final_buy or final_sell)
+// In multi-mode l'entrata su pullback (un ordine in attesa alla volta) non è
+// compatibile coi trade sovrapposti → si usano entrate a mercato.
+eff_use_pullback = use_pullback and not multi_mode
+
+if eff_use_pullback and strategy.position_size == 0 and not pend_active and (final_buy or final_sell)
     _isbuy = final_buy
     _lim   = _isbuy ? close - atr_val * pullback_atr : close + atr_val * pullback_atr
     _slv   = _isbuy ? sl_low_anchor - atr_val * eff_sl_atr_mult : sl_high_anchor + atr_val * eff_sl_atr_mult
@@ -455,7 +468,7 @@ if use_pullback and strategy.position_size == 0 and not pend_active and (final_b
             line.new(bar_index, _lim, bar_index + pullback_expiry, _lim, color=_pc, style=line.style_dashed, width=1)
             label.new(bar_index, _lim, "⏳ " + (_isbuy ? "BUY" : "SELL") + " " + str.tostring(math.round(_lim, 2)), style=_isbuy ? label.style_label_up : label.style_label_down, color=color.new(_pc, 75), textcolor=_pc, size=size.tiny)
 
-if use_pullback and pend_active and strategy.position_size == 0
+if eff_use_pullback and pend_active and strategy.position_size == 0
     _expired = bar_index - pend_bar >= pullback_expiry
     if not _expired
         // Finché valido: mantieni l'ordine limite al prezzo migliore
@@ -491,7 +504,7 @@ if use_pullback and pend_active and strategy.position_size == 0
         else
             pend_active := false
 
-if use_pullback and pend_active and strategy.position_size != 0
+if eff_use_pullback and pend_active and strategy.position_size != 0
     pend_active := false
     entry_px := strategy.position_avg_price
     be_active := false
@@ -518,7 +531,7 @@ if use_pullback and pend_active and strategy.position_size != 0
         sl_box  := box.new(bar_index, entry_px, bar_index+50, sl_sell, bgcolor=color.new(color.red,70), border_color=color.new(color.red,30))
         alert("🔴 GoldBot SELL XAUUSD (pullback)\nEntry: " + str.tostring(entry_px,"#.##") + "\nSL: " + str.tostring(sl_sell,"#.##") + "\nTP1: " + str.tostring(tp1_sell,"#.##") + "\nTP2: " + str.tostring(tp2_sell,"#.##") + "\nMode: " + mode, alert.freq_once_per_bar_close)
 
-if not use_pullback and final_buy
+if not eff_use_pullback and final_buy
     last_buy_bar := bar_index
     sl_buy   := sl_low_anchor - atr_val * eff_sl_atr_mult
     tp1_buy  := use_quick_tp ? close + tp1_r * (close - sl_buy) : m15_struct_high
@@ -541,7 +554,7 @@ if not use_pullback and final_buy
           "\nScore: "  + str.tostring(score_buy) +
           "\nMode: "   + mode, alert.freq_once_per_bar_close)
 
-if not use_pullback and final_sell
+if not eff_use_pullback and final_sell
     last_sell_bar := bar_index
     sl_sell  := sl_high_anchor + atr_val * eff_sl_atr_mult
     tp1_sell := use_quick_tp ? close - tp1_r * (sl_sell - close) : m15_struct_low
