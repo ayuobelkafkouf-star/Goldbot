@@ -12,6 +12,7 @@ strategy("GoldBot AMD x iFVG", shorttitle="GoldBot AMD", overlay=true,
   default_qty_type=strategy.percent_of_equity, default_qty_value=10,
   commission_type=strategy.commission.cash_per_contract, commission_value=0.35,
   slippage=5, process_orders_on_close=true,
+  pyramiding=20,
   max_labels_count=500, max_boxes_count=500)
 
 // ─── AMD (Accumulo · Manipolazione · Distribuzione) ────────
@@ -43,6 +44,10 @@ start_hour  = input.int(9,  "Ora inizio (Roma)", group="Filtri", minval=0, maxva
 end_hour    = input.int(20, "Ora fine (Roma)",   group="Filtri", minval=0, maxval=23)
 
 show_levels = input.bool(true, "Disegna range/SL/TP", group="Grafica")
+
+// ─── VIA LIBERA (trade liberi, niente blocchi) ─────────────
+free_mode = input.bool(true, "🚀 Via libera (trade liberi, niente blocchi)", group="Libero", tooltip="ON = il bot apre i trade liberamente: piu posizioni SOVRAPPOSTE (fino al max sotto) e NESSUN filtro R:R che blocca. ⚠️ Una strategia TradingView non puo essere long e short insieme: i trade multipli sono solo nello stesso verso. ⚠️ Piu trade aperti = piu rischio nello stesso momento. OFF = un trade alla volta col filtro R:R.")
+max_open  = input.int(5, "Max trade aperti insieme", group="Libero", minval=1, maxval=20, tooltip="Quanti trade puo tenere aperti contemporaneamente quando la Via libera e ON.")
 
 // ─── DATI BASE ─────────────────────────────────────────────
 atr = ta.atr(14)
@@ -88,13 +93,16 @@ risk_buy  = close - sl_buy_calc
 risk_sell = sl_sell_calc - close
 rr_buy  = risk_buy  > 0 ? (range_high - close) / risk_buy  : 0.0
 rr_sell = risk_sell > 0 ? (close - range_low)  / risk_sell : 0.0
-rr_ok_buy  = not use_rr or rr_buy  >= min_rr
-rr_ok_sell = not use_rr or rr_sell >= min_rr
+rr_ok_buy  = not use_rr or free_mode or rr_buy  >= min_rr
+rr_ok_sell = not use_rr or free_mode or rr_sell >= min_rr
 
 // ─── SEGNALI FINALI ────────────────────────────────────────
-flat = strategy.position_size == 0
-buy_signal  = flat and sweep_fresh and swept_dir == 1  and fvg_ok_buy  and bias_ok_buy  and sess_ok and risk_buy  > 0 and rr_ok_buy
-sell_signal = flat and sweep_fresh and swept_dir == -1 and fvg_ok_sell and bias_ok_sell and sess_ok and risk_sell > 0 and rr_ok_sell
+// Via libera ON = piu trade sovrapposti (stesso verso) fino a max_open, niente
+// filtro R:R. OFF = un solo trade alla volta col filtro R:R.
+can_buy  = free_mode ? (strategy.position_size >= 0 and strategy.opentrades < max_open) : strategy.position_size == 0
+can_sell = free_mode ? (strategy.position_size <= 0 and strategy.opentrades < max_open) : strategy.position_size == 0
+buy_signal  = can_buy  and sweep_fresh and swept_dir == 1  and fvg_ok_buy  and bias_ok_buy  and sess_ok and risk_buy  > 0 and rr_ok_buy
+sell_signal = can_sell and sweep_fresh and swept_dir == -1 and fvg_ok_sell and bias_ok_sell and sess_ok and risk_sell > 0 and rr_ok_sell
 
 // ─── SIZING ────────────────────────────────────────────────
 f_qty(_sl_dist) =>
