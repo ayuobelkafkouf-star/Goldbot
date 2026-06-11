@@ -18,10 +18,10 @@ strategy("GoldBot AMD x iFVG", shorttitle="GoldBot AMD", overlay=true,
 // ─── AMD (Accumulo · Manipolazione · Distribuzione) ────────
 range_len   = input.int(20, "Range accumulo (barre)", group="AMD", minval=5, maxval=200, tooltip="Quante candele indietro guardare per definire il range di accumulo (massimo e minimo). Il prezzo deve rompere questo range per 'manipolare'.")
 sweep_valid = input.int(5,  "Validità sweep (barre)", group="AMD", minval=1, maxval=30, tooltip="Dopo che il prezzo ha spazzato il range (sweep), quante candele restano valide per cercare il Fair Value Gap ed entrare. Passate queste, lo sweep scade.")
-require_back_in = input.bool(true, "Sweep deve rientrare nel range", group="AMD", tooltip="ON = lo sweep conta solo se la candela ROMPE il range con la mecha ma CHIUDE di nuovo dentro (vera trappola). OFF = basta che rompa il range (piu entrate, meno selettivo).")
+require_back_in = input.bool(false, "Sweep deve rientrare nel range", group="AMD", tooltip="ON = lo sweep conta solo se la candela ROMPE il range con la mecha ma CHIUDE di nuovo dentro (vera trappola, piu selettivo). OFF = basta che rompa il range (MOLTE piu entrate). Default OFF = bot libero.")
 
 // ─── iFVG (Fair Value Gap = squilibrio dell'impulso) ───────
-use_fvg     = input.bool(true, "Richiedi Fair Value Gap (iFVG)", group="iFVG", tooltip="ON = entra solo se dopo lo sweep si forma un Fair Value Gap nel verso dell'inversione (impulso forte = mano forte che entra). OFF = entra appena il prezzo riparte dopo lo sweep (piu entrate).")
+use_fvg     = input.bool(false, "Richiedi Fair Value Gap (iFVG)", group="iFVG", tooltip="ON = entra solo se dopo lo sweep si forma un Fair Value Gap nel verso dell'inversione (piu selettivo, meno trade). OFF = entra appena c'e lo sweep, senza aspettare il FVG (MOLTE piu entrate). Default OFF = bot libero.")
 
 // ─── DIREZIONE / BIAS (opzionale) ──────────────────────────
 use_bias    = input.bool(false, "Solo nel verso del trend (EMA 200)", group="Direzione", tooltip="ON = compra solo sopra la EMA200 e vende solo sotto (filtro di tendenza di fondo). OFF = AMD puro nei due sensi.")
