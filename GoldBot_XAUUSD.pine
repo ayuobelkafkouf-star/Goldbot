@@ -1,230 +1,742 @@
 //@version=5
-// ╔══════════════════════════════════════════════════════════╗
-// ║  GoldBot — AMD x iFVG (Smart Money)                        ║
-// ║  Strategia UNICA, pulita:                                  ║
-// ║   1) ACCUMULO    → range delle ultime N candele            ║
-// ║   2) MANIPOLAZIONE → sweep (il prezzo rompe il range e      ║
-// ║      rientra = prende gli stop / trappola)                 ║
-// ║   3) iFVG/DISTRIBUZIONE → si forma un Fair Value Gap nel   ║
-// ║      verso opposto → ENTRATA, target il lato opposto.      ║
-// ╚══════════════════════════════════════════════════════════╝
-strategy("GoldBot AMD x iFVG", shorttitle="GoldBot AMD", overlay=true,
+strategy("GoldBot XAUUSD v5.2", shorttitle="GoldBot v5.2", overlay=true,
   default_qty_type=strategy.percent_of_equity, default_qty_value=10,
   commission_type=strategy.commission.cash_per_contract, commission_value=0.35,
-  slippage=5, process_orders_on_close=true,
+  slippage=5, margin_long=100, margin_short=100,
+  calc_on_every_tick=false, process_orders_on_close=true,
   pyramiding=20,
-  max_labels_count=500, max_boxes_count=500)
+  max_lines_count=500, max_labels_count=500, max_boxes_count=500)
 
-// ─── AMD (Accumulo · Manipolazione · Distribuzione) ────────
-range_len   = input.int(20, "Range accumulo (barre)", group="AMD", minval=5, maxval=200, tooltip="Quante candele indietro guardare per definire il range di accumulo (massimo e minimo). Il prezzo deve rompere questo range per 'manipolare'.")
-sweep_valid = input.int(5,  "Validità sweep (barre)", group="AMD", minval=1, maxval=30, tooltip="Dopo che il prezzo ha spazzato il range (sweep), quante candele restano valide per cercare il Fair Value Gap ed entrare. Passate queste, lo sweep scade.")
-require_back_in = input.bool(false, "Sweep deve rientrare nel range", group="AMD", tooltip="ON = lo sweep conta solo se la candela ROMPE il range con la mecha ma CHIUDE di nuovo dentro (vera trappola, piu selettivo). OFF = basta che rompa il range (MOLTE piu entrate). Default OFF = bot libero.")
+// ─── INPUTS ───────────────────────────────────────────────
+mode = input.string("Conservativo", "Modalità operativa",
+   options=["Conservativo", "Sessione Estesa", "Aggressivo", "24h Qualità"],
+   group="Modalità",
+   tooltip="Conservativo: 13-17, score 60, max 5 trade/g. Sessione Estesa: 8-20, score MIN 70, max 5 trade/g. Aggressivo: 8-20, score 60, max 10 trade/g, cooldown 2. 24h QUALITÀ: 24h, score MIN 75, spike+body più stretti, max 8 trade/g, cooldown 3 (selettivo).")
+min_score       = input.int(60, "Score minimo per trade", group="Modalità", minval=0, maxval=100, tooltip="Soglia base. In Sessione Estesa diventa min 70 automaticamente.")
+max_zones       = input.int(5, "Zone attive max per lato", group="Modalità", minval=1, maxval=10)
+strategy_type   = input.string("Trend-Following", "Tipo strategia", options=["Zone (retest)", "Trend-Following", "Entrambe"], group="Modalità", tooltip="Zone: aspetta il rimbalzo in supply/demand. Trend-Following: segue il trend (entra quando il prezzo rientra sulla EMA veloce e riparte nel verso del trend) → prende i movimenti dritti. Entrambe: usa tutti e due (più entrate).")
+tf_use_momentum = input.bool(true, "TF: entra anche su spike di conferma (oltre EMA)", group="Modalità", tooltip="In Trend-Following, oltre al rientro sulla EMA, entra nel verso del trend anche sulle candele di conferma (spike). Cattura i movimenti dritti dove la EMA non incrocia → più entrate. Disattivalo per tornare al solo incrocio EMA.")
+tf_max_ext      = input.float(1.5, "TF: distanza max dalla EMA (ATR)", group="Modalità", minval=0.5, maxval=5.0, step=0.25, tooltip="Anti-inseguimento: se il prezzo è già scappato oltre questa distanza dalla EMA veloce, il movimento è esteso e il bot NON entra (entrare lì = comprare il massimo / vendere il minimo dello spike, poi il rimbalzo becca lo stop). Più basso = più severo.")
 
-// ─── iFVG (Fair Value Gap = squilibrio dell'impulso) ───────
-use_fvg     = input.bool(false, "Richiedi Fair Value Gap (iFVG)", group="iFVG", tooltip="ON = entra solo se dopo lo sweep si forma un Fair Value Gap nel verso dell'inversione (piu selettivo, meno trade). OFF = entra appena c'e lo sweep, senza aspettare il FVG (MOLTE piu entrate). Default OFF = bot libero.")
+h1_fast  = input.int(21, "H1 EMA veloce", group="Trend H1")
+h1_slow  = input.int(55, "H1 EMA lenta",  group="Trend H1")
+m15_fast = input.int(21, "M15 EMA veloce", group="Trend M15")
+m15_slow = input.int(55, "M15 EMA lenta",  group="Trend M15")
+rsi_len  = input.int(14, "RSI periodo", group="RSI")
+rsi_ob   = input.int(65, "RSI Ipercomprato", group="RSI")
+rsi_os   = input.int(35, "RSI Ipervenduto",  group="RSI")
 
-// ─── DIREZIONE / BIAS (opzionale) ──────────────────────────
-use_bias    = input.bool(false, "Solo nel verso del trend (EMA 200)", group="Direzione", tooltip="ON = compra solo sopra la EMA200 e vende solo sotto (filtro di tendenza di fondo). OFF = AMD puro nei due sensi.")
-bias_len    = input.int(200, "Periodo EMA bias", group="Direzione", minval=20, maxval=400)
+pivot_left  = input.int(5, "Pivot left bars",  group="Zone", minval=2, maxval=15)
+pivot_right = input.int(3, "Pivot right bars", group="Zone", minval=2, maxval=10)
+zone_width  = input.float(1.5, "Larghezza zona ATR", group="Zone", minval=0.5, maxval=5.0)
+zone_tol    = input.float(0.5, "Tolleranza retest ATR", group="Zone", minval=0.1, maxval=2.0)
 
-// ─── RISCHIO / USCITE ──────────────────────────────────────
+spike_mult  = input.float(0.5, "Spike minimo ATR", group="Spike", minval=0.1, maxval=2.0)
+body_mult   = input.float(0.3, "Body conferma minimo ATR", group="Spike", minval=0.1, maxval=1.0)
+
 risk_pct    = input.float(0.5, "Rischio % per trade", group="Rischio", minval=0.1, maxval=3.0, step=0.1)
-sl_buf      = input.float(0.5, "SL buffer ATR oltre lo sweep", group="Rischio", minval=0.0, maxval=3.0, step=0.1, tooltip="Lo stop loss va appena oltre il punto spazzato (la mecha della trappola) piu questo cuscinetto in ATR.")
-tp1_r       = input.float(1.5, "TP1 in multipli di rischio (R)", group="Rischio", minval=0.3, maxval=10.0, step=0.1)
-tp1_pct     = input.float(50,  "% chiusura a TP1", group="Rischio", minval=10, maxval=90)
+sl_atr_mult = input.float(0.6, "SL buffer ATR", group="Rischio", minval=0.1, maxval=2.0, step=0.1)
+sl_swing_len = input.int(3, "Barre swing per SL (sul grafico)", group="Rischio", minval=1, maxval=20, tooltip="Lo SL va oltre il minimo/massimo delle ultime N candele DEL GRAFICO (+ buffer ATR). Prima era ancorato alla candela M15: sul grafico H1 risultava troppo stretto e veniva preso dal semplice rumore. Ora lo stop si scala da solo al timeframe che usi.")
+tp1_pct     = input.float(80,  "% chiusura TP1", group="Rischio", minval=10, maxval=90)
+use_quick_tp = input.bool(true, "TP rapido a R fisso (alza win rate)", group="Rischio", tooltip="Mette TP1 a un multiplo fisso del rischio (es. 1R) invece che sulla struttura: target più vicino, colpito più spesso → win rate più alto (ma vincite più piccole). Il restante % corre verso TP2.")
+tp1_r        = input.float(1.4, "TP1 in multipli di rischio (R)", group="Rischio", minval=0.3, maxval=5.0, step=0.1)
 use_be      = input.bool(true, "Break-even dopo TP1", group="Rischio")
 use_trail   = input.bool(true, "Trailing stop ATR dopo TP1", group="Rischio")
-trail_mult  = input.float(2.0, "Trailing ATR mult", group="Rischio", minval=0.5, maxval=6.0, step=0.1)
-use_rr      = input.bool(true, "Filtro R:R minimo (target/SL)", group="Rischio")
-min_rr      = input.float(1.5, "R:R minimo", group="Rischio", minval=0.5, maxval=10.0, step=0.1)
+trail_mult  = input.float(2.0, "Trailing ATR mult", group="Rischio", minval=0.5, maxval=5.0, step=0.1)
+use_rr      = input.bool(true, "Filtro Risk/Reward minimo", group="Rischio", tooltip="Non entra se il target TP1 è troppo piccolo rispetto allo stop. 1.0 = TP1 almeno pari al rischio. Blocca i trade con SL più largo del target.")
+min_rr      = input.float(1.4, "R:R minimo (TP1/SL)", group="Rischio", minval=0.3, maxval=5.0, step=0.1)
 
-// ─── FILTRO ORARIO (opzionale) ─────────────────────────────
-use_session = input.bool(false, "Filtra orario (Londra/NY)", group="Filtri", tooltip="ON = opera solo tra le ore indicate (ora di Roma). OFF = 24h.")
-start_hour  = input.int(9,  "Ora inizio (Roma)", group="Filtri", minval=0, maxval=23)
-end_hour    = input.int(20, "Ora fine (Roma)",   group="Filtri", minval=0, maxval=23)
+// ─── ENTRATA SU PULLBACK (prezzo migliore, non a metà movimento) ─────
+use_pullback    = input.bool(true, "Entrata su pullback (prezzo migliore)", group="🎯 Entrata", tooltip="Invece di entrare subito a mercato (a metà del movimento), piazza un ordine limite verso il bordo della zona e aspetta che il prezzo torni: entri dal prezzo migliore con SL più stretto e R:R migliore. Se il prezzo non rientra entro le barre di validità, il trade viene saltato. ⚠️ Si disattiva da solo quando i Trade multipli sono ON.")
+pullback_atr    = input.float(0.6, "Distanza pullback (ATR)", group="🎯 Entrata", minval=0.1, maxval=3.0, step=0.1, tooltip="Quanto mettere l'ordine più indietro rispetto alla candela di conferma. Più alto = prezzo migliore ma meno probabilità che venga riempito.")
+pullback_expiry = input.int(6, "Barre di validità ordine", group="🎯 Entrata", minval=1, maxval=30, tooltip="Se entro queste barre il prezzo non torna al livello, l'ordine viene annullato.")
+pullback_fallback = input.bool(true, "Ibrido: entra a mercato se non si riempie", group="🎯 Entrata", tooltip="Se entro le barre di validità il prezzo non torna al livello, entra comunque a mercato (con SL/TP ricalcolati al prezzo attuale). Così non perdi i movimenti forti che non fanno pullback.")
+show_pullback_line = input.bool(true, "Mostra linea ordine limite in attesa", group="🎯 Entrata", tooltip="Disegna una linea tratteggiata al livello dell'ordine limite mentre il bot aspetta il pullback. Sparisce quando l'ordine viene riempito o scade.")
 
-show_levels = input.bool(true, "Disegna range/SL/TP", group="Grafica")
+use_session   = input.bool(true, "Filtro sessione London/NY overlap", group="Filtri")
+session_start = input.int(13, "Sessione start (Roma)", group="Filtri", minval=0, maxval=23)
+session_end   = input.int(17, "Sessione end (Roma)",   group="Filtri", minval=0, maxval=23)
+use_hours  = input.bool(false, "Filtra orari (fallback se sessione OFF)", group="Filtri")
+start_hour = input.int(8,  "Ora inizio", group="Filtri")
+end_hour   = input.int(20, "Ora fine",   group="Filtri")
 
-// ─── VIA LIBERA (trade liberi, niente blocchi) ─────────────
-free_mode = input.bool(true, "🚀 Via libera (trade liberi, niente blocchi)", group="Libero", tooltip="ON = il bot apre i trade liberamente: piu posizioni SOVRAPPOSTE (fino al max sotto) e NESSUN filtro R:R che blocca. ⚠️ Una strategia TradingView non puo essere long e short insieme: i trade multipli sono solo nello stesso verso. ⚠️ Piu trade aperti = piu rischio nello stesso momento. OFF = un trade alla volta col filtro R:R.")
-max_open  = input.int(5, "Max trade aperti insieme", group="Libero", minval=1, maxval=20, tooltip="Quanti trade puo tenere aperti contemporaneamente quando la Via libera e ON.")
+use_circuit  = input.bool(true, "Circuit breaker drawdown", group="Protezione")
+dd_threshold = input.float(5.0, "DD max % dal peak", group="Protezione", minval=1.0, maxval=20.0, step=0.5)
+pause_days   = input.int(3,    "Giorni pausa dopo trigger", group="Protezione", minval=1, maxval=14)
 
-// ─── DATI BASE ─────────────────────────────────────────────
-atr = ta.atr(14)
-ema_bias = ta.ema(close, bias_len)
+// ─── ANTI-WHIPSAW (3 protezioni aggiuntive) ─────
+use_adx          = input.bool(true, "Filtro ADX (entra solo in trend forte)", group="Anti-Whipsaw", tooltip="ADX misura la forza del trend. Sotto soglia il trend è debole/incerto e il bot non entra.")
+adx_threshold    = input.float(28.0, "Soglia ADX minima", group="Anti-Whipsaw", minval=10.0, maxval=50.0, step=1.0)
+use_smart_cd     = input.bool(true, "Cooldown esteso dopo stop loss", group="Anti-Whipsaw", tooltip="Dopo uno stop loss, aspetta più barre prima di rientrare. Evita doppi stop nelle inversioni-trappola.")
+post_sl_cooldown = input.int(10, "Barre cooldown dopo SL", group="Anti-Whipsaw", minval=1, maxval=50)
+use_adaptive_sl  = input.bool(true, "Stop loss adattivo alla volatilità", group="Anti-Whipsaw", tooltip="In giornate di alta volatilità lo SL si allarga automaticamente per evitare stop hunting.")
+vol_high_mult    = input.float(1.2, "Soglia alta volatilità (x ATR medio)", group="Anti-Whipsaw", minval=1.1, maxval=3.0, step=0.1)
+sl_high_vol_mult = input.float(1.3, "Moltiplicatore SL in alta volatilità", group="Anti-Whipsaw", minval=1.0, maxval=3.0, step=0.25)
 
-// ─── 1) RANGE DI ACCUMULO ──────────────────────────────────
-range_high = ta.highest(high, range_len)[1]
-range_low  = ta.lowest(low,  range_len)[1]
+// ─── AUTO-ADATTIVO (il bot si regola dai risultati recenti) ─────
+use_adaptive       = input.bool(true, "Auto-adattivo (impara dai trade recenti)", group="🧠 Auto-adattivo", tooltip="Il bot si regola da solo: dopo perdite consecutive diventa più selettivo (score/R:R/cooldown più alti) e penalizza il lato che sta perdendo di recente. Calcolato live dai trade. Niente modifiche manuali.")
+adapt_window       = input.int(15, "Finestra trade recenti", group="🧠 Auto-adattivo", minval=4, maxval=100)
+adapt_max_steps    = input.int(3, "Perdite consecutive max considerate", group="🧠 Auto-adattivo", minval=1, maxval=10)
+adapt_score_step   = input.int(7, "+ Score per perdita consecutiva", group="🧠 Auto-adattivo", minval=0, maxval=20)
+adapt_rr_step      = input.float(0.2, "+ R:R per perdita consecutiva", group="🧠 Auto-adattivo", minval=0.0, maxval=1.0, step=0.05)
+adapt_cd_step      = input.int(2, "+ Cooldown barre per perdita", group="🧠 Auto-adattivo", minval=0, maxval=10)
+adapt_min_samples  = input.int(4, "Trade minimi per valutare un lato", group="🧠 Auto-adattivo", minval=2, maxval=50)
+adapt_weak_wr      = input.float(35.0, "Win rate lato debole (%)", group="🧠 Auto-adattivo", minval=0, maxval=100, tooltip="Se BUY o SELL nella finestra ha win rate sotto questa soglia, quel lato diventa più selettivo.")
+adapt_side_penalty = input.int(15, "+ Score per il lato debole", group="🧠 Auto-adattivo", minval=0, maxval=40)
 
-// ─── 2) MANIPOLAZIONE: SWEEP DEL RANGE ─────────────────────
-sweep_low_now  = low  < range_low  and (not require_back_in or close > range_low)   // spazza i minimi (liquidita sell-side)
-sweep_high_now = high > range_high and (not require_back_in or close < range_high)  // spazza i massimi (liquidita buy-side)
+use_atr    = input.bool(true, "Filtro ATR", group="Filtri")
+atr_min    = input.float(1.5, "ATR minimo", group="Filtri")
+cooldown_bars  = input.int(5, "Cooldown barre", group="Filtri")
+enable_max_trades = input.bool(true, "Limita trade giornalieri", group="Filtri", tooltip="Disattiva per togliere il limite trade al giorno (il bot opera libero, ma restano attivi P&L giorno e circuit breaker).")
+max_trades_day = input.int(5, "Max trade giorno", group="Filtri")
+max_loss   = input.float(1.0, "Max perdita % giorno", group="Filtri")
+max_profit = input.float(5.0, "Max profitto % giorno", group="Filtri")
 
-var int   swept_dir = 0     // 1 = atteso BUY (spazzato il basso), -1 = atteso SELL
-var int   swept_bar = 0
-var float swept_px  = na
-if sweep_low_now
-    swept_dir := 1
-    swept_bar := bar_index
-    swept_px  := low
-if sweep_high_now
-    swept_dir := -1
-    swept_bar := bar_index
-    swept_px  := high
-sweep_fresh = swept_dir != 0 and (bar_index - swept_bar) <= sweep_valid
+// ─── MODALITÀ LIBERA (nessun freno di frequenza) ─────
+// Toglie SOLO i freni che limitano QUANDO/QUANTE volte operare: cooldown tra i
+// trade, limite trade/giorno, stop P&L giornaliero e circuit breaker drawdown.
+// Resta un trade alla volta e restano TUTTI i filtri di qualità del segnale
+// (trend, ADX, RSI, zone, R:R, notizie). Operazioni multiple: più avanti su richiesta.
+free_mode = input.bool(true, "🚀 Modalità libera (togli i freni: cooldown, max trade/g, stop giorno, circuit breaker)", group="Filtri", tooltip="ON = il bot opera ogni volta che il segnale è valido, senza aspettare il cooldown e senza limiti giornalieri. Tutti i filtri di qualità (trend, ADX, RSI, R:R, notizie) restano attivi. OFF = ripristina tutti i freni di sicurezza.")
 
-// ─── 3) iFVG: FAIR VALUE GAP NEL VERSO DELL'INVERSIONE ─────
-bull_fvg = low  > high[2]   // gap rialzista: impulso su che lascia squilibrio
-bear_fvg = high < low[2]    // gap ribassista
-fvg_ok_buy  = not use_fvg or bull_fvg
-fvg_ok_sell = not use_fvg or bear_fvg
+// ─── TRADE MULTIPLI (più posizioni aperte insieme) ─────
+multi_mode = input.bool(true, "♾️ Trade multipli (apre un altro trade mentre il precedente è aperto)", group="Filtri", tooltip="ON = il bot può aprire più trade SOVRAPPOSTI, fino al numero massimo qui sotto. ⚠️ Nota tecnica di TradingView: una strategia non può essere LONG e SHORT insieme — i trade multipli sono SOLO nella stessa direzione (aggiunge nel verso del trend). Un segnale opposto non apre un trade contrario finché la posizione è aperta. ⚠️ RISCHIO: ogni trade rischia il suo % → 3 trade = ~3 volte il rischio. OFF = un solo trade alla volta.")
+max_open   = input.int(3, "Max trade aperti insieme", group="Filtri", minval=1, maxval=20, tooltip="Quanti trade può tenere aperti contemporaneamente (solo se Trade multipli è ON).")
 
-// ─── DIREZIONE + ORARIO ────────────────────────────────────
-bias_ok_buy  = not use_bias or close > ema_bias
-bias_ok_sell = not use_bias or close < ema_bias
-h_now   = hour(time, "Europe/Rome")
-sess_ok = not use_session or (h_now >= start_hour and h_now < end_hour)
+use_news     = input.bool(true, "Filtro notizie", group="Notizie")
+news1_active = input.bool(true,  "NFP/CPI 1", group="Notizie")
+news1_hour   = input.int(14, "Ora notizia 1", group="Notizie")
+news1_min    = input.int(30, "Min notizia 1", group="Notizie")
+news2_active = input.bool(false, "Notizia 2 (FOMC)", group="Notizie")
+news2_hour   = input.int(20, "Ora notizia 2", group="Notizie")
+news2_min    = input.int(0,  "Min notizia 2", group="Notizie")
+news3_active = input.bool(false, "Notizia 3", group="Notizie")
+news3_hour   = input.int(16, "Ora notizia 3", group="Notizie")
+news3_min    = input.int(0,  "Min notizia 3", group="Notizie")
+news_before  = input.int(30, "Minuti prima", group="Notizie")
+news_after   = input.int(30, "Minuti dopo",  group="Notizie")
 
-// ─── SL/TP CANDIDATI + R:R ─────────────────────────────────
-sl_buy_calc  = swept_px - atr * sl_buf
-sl_sell_calc = swept_px + atr * sl_buf
-risk_buy  = close - sl_buy_calc
-risk_sell = sl_sell_calc - close
-rr_buy  = risk_buy  > 0 ? (range_high - close) / risk_buy  : 0.0
-rr_sell = risk_sell > 0 ? (close - range_low)  / risk_sell : 0.0
-rr_ok_buy  = not use_rr or free_mode or rr_buy  >= min_rr
-rr_ok_sell = not use_rr or free_mode or rr_sell >= min_rr
+// ─── TIMEFRAME DI RIFERIMENTO (scala la strategia al tuo grafico) ───
+tf_fast = input.timeframe("15", "Timeframe veloce (riferimento)", group="Timeframe", tooltip="Riferimento 'veloce' per trend/zone/spike. Su grafico M15 lascia 15. Su grafico H1 prova 60.")
+tf_slow = input.timeframe("60", "Timeframe lento (struttura/TP2)", group="Timeframe", tooltip="Riferimento 'lento' per trend di fondo e struttura (TP2). Su grafico M15 lascia 60. Su grafico H1 prova 240 (H4).")
 
-// ─── SEGNALI FINALI ────────────────────────────────────────
-// Via libera ON = piu trade sovrapposti (stesso verso) fino a max_open, niente
-// filtro R:R. OFF = un solo trade alla volta col filtro R:R.
-can_buy  = free_mode ? (strategy.position_size >= 0 and strategy.opentrades < max_open) : strategy.position_size == 0
-can_sell = free_mode ? (strategy.position_size <= 0 and strategy.opentrades < max_open) : strategy.position_size == 0
-buy_signal  = can_buy  and sweep_fresh and swept_dir == 1  and fvg_ok_buy  and bias_ok_buy  and sess_ok and risk_buy  > 0 and rr_ok_buy
-sell_signal = can_sell and sweep_fresh and swept_dir == -1 and fvg_ok_sell and bias_ok_sell and sess_ok and risk_sell > 0 and rr_ok_sell
+// ─── TIMEFRAME DATA (NO REPAINT) ──────────────────────────
+[m15_ef, m15_es, m15_rsi, m15_high, m15_low, m15_close, m15_open, m15_atr, m15_ph, m15_pl, m15_struct_high, m15_struct_low] = request.security(syminfo.tickerid, tf_fast,
+  [ta.ema(close, m15_fast)[1], ta.ema(close, m15_slow)[1], ta.rsi(close, rsi_len)[1], high[1], low[1], close[1], open[1], ta.atr(14)[1], ta.pivothigh(high, pivot_left, pivot_right)[1], ta.pivotlow(low, pivot_left, pivot_right)[1], ta.highest(high, 20)[1], ta.lowest(low, 20)[1]],
+  lookahead=barmerge.lookahead_off)
 
-// ─── SIZING ────────────────────────────────────────────────
+[h1_ef, h1_es, h1_struct_high, h1_struct_low] = request.security(syminfo.tickerid, tf_slow,
+  [ta.ema(close, h1_fast)[1], ta.ema(close, h1_slow)[1], ta.highest(high, 20)[1], ta.lowest(low, 20)[1]],
+  lookahead=barmerge.lookahead_off)
+
+atr_val    = ta.atr(14)
+
+// ─── ANCORE SL SUL GRAFICO ────────────────────────────────
+sl_low_anchor  = ta.lowest(low,   sl_swing_len)
+sl_high_anchor = ta.highest(high, sl_swing_len)
+
+// ─── TREND ────────────────────────────────────────────────
+h1_bull  = h1_ef > h1_es
+h1_bear  = h1_ef < h1_es
+m15_bull = m15_ef > m15_es
+m15_bear = m15_ef < m15_es
+
+// ─── ADX (FORZA DEL TREND) ────────────────────────────────
+[di_plus_calc, di_minus_calc, adx_native] = ta.dmi(14, 14)
+adx_val = adx_native
+
+// ─── VOLATILITÀ (per SL adattivo) ─────────────────────────
+atr_avg_long = ta.sma(atr_val, 50)
+is_high_vol  = not na(atr_avg_long) and atr_avg_long > 0 and atr_val > atr_avg_long * vol_high_mult
+eff_sl_atr_mult = use_adaptive_sl and is_high_vol ? sl_atr_mult * sl_high_vol_mult : sl_atr_mult
+
+// ─── MODALITÀ EFFETTIVA ───────────────────────────────────
+is_conservative = mode == "Conservativo"
+is_extended     = mode == "Sessione Estesa"
+is_aggressive   = mode == "Aggressivo"
+is_quality_24h  = mode == "24h Qualità"
+
+eff_use_session   = is_conservative
+eff_force_hours   = is_extended or is_aggressive
+eff_no_hour_limit = is_quality_24h
+eff_cooldown_bars = is_aggressive ? 2 : is_quality_24h ? 3 : cooldown_bars
+eff_max_trades    = is_quality_24h ? 8 : is_aggressive ? 10 : max_trades_day
+eff_zone_tol      = is_quality_24h ? zone_tol : is_aggressive ? 0.7 : zone_tol
+eff_min_score     = is_quality_24h ? 60 : is_extended ? math.max(min_score, 70) : min_score
+eff_spike_mult    = is_quality_24h ? math.max(spike_mult, 0.5) : spike_mult
+eff_body_mult     = is_quality_24h ? math.max(body_mult,  0.35) : body_mult
+
+// ─── MULTI-ZONE SUPPLY/DEMAND ─────────────────────────────
+var array<float> sup_tops  = array.new<float>()
+var array<float> sup_bots  = array.new<float>()
+var array<box>   sup_boxes = array.new<box>()
+var array<float> dem_tops  = array.new<float>()
+var array<float> dem_bots  = array.new<float>()
+var array<box>   dem_boxes = array.new<box>()
+
+if not na(m15_ph)
+    s_top = m15_ph
+    s_bot = m15_ph - m15_atr * zone_width
+    nb = box.new(bar_index, s_top, bar_index + 10, s_bot, bgcolor=color.new(color.red, 85), border_color=color.new(color.red, 50), border_width=1)
+    array.push(sup_tops, s_top)
+    array.push(sup_bots, s_bot)
+    array.push(sup_boxes, nb)
+    if array.size(sup_tops) > max_zones
+        box.delete(array.shift(sup_boxes))
+        array.shift(sup_tops)
+        array.shift(sup_bots)
+
+if not na(m15_pl)
+    d_bot = m15_pl
+    d_top = m15_pl + m15_atr * zone_width
+    nb = box.new(bar_index, d_top, bar_index + 10, d_bot, bgcolor=color.new(color.green, 85), border_color=color.new(color.green, 50), border_width=1)
+    array.push(dem_tops, d_top)
+    array.push(dem_bots, d_bot)
+    array.push(dem_boxes, nb)
+    if array.size(dem_tops) > max_zones
+        box.delete(array.shift(dem_boxes))
+        array.shift(dem_tops)
+        array.shift(dem_bots)
+
+i_s = array.size(sup_tops) - 1
+while i_s >= 0
+    if m15_close > array.get(sup_tops, i_s) + m15_atr * 0.5
+        box.delete(array.get(sup_boxes, i_s))
+        array.remove(sup_tops, i_s)
+        array.remove(sup_bots, i_s)
+        array.remove(sup_boxes, i_s)
+    i_s := i_s - 1
+
+i_d = array.size(dem_tops) - 1
+while i_d >= 0
+    if m15_close < array.get(dem_bots, i_d) - m15_atr * 0.5
+        box.delete(array.get(dem_boxes, i_d))
+        array.remove(dem_tops, i_d)
+        array.remove(dem_bots, i_d)
+        array.remove(dem_boxes, i_d)
+    i_d := i_d - 1
+
+if array.size(sup_boxes) > 0
+    for i = 0 to array.size(sup_boxes) - 1
+        box.set_right(array.get(sup_boxes, i), bar_index + 5)
+if array.size(dem_boxes) > 0
+    for i = 0 to array.size(dem_boxes) - 1
+        box.set_right(array.get(dem_boxes, i), bar_index + 5)
+
+price_at_supply = false
+if array.size(sup_tops) > 0
+    for i = 0 to array.size(sup_tops) - 1
+        s_t = array.get(sup_tops, i)
+        s_b = array.get(sup_bots, i)
+        if m15_high >= s_b - m15_atr * eff_zone_tol and m15_high <= s_t + m15_atr * eff_zone_tol
+            price_at_supply := true
+
+price_at_demand = false
+if array.size(dem_tops) > 0
+    for i = 0 to array.size(dem_tops) - 1
+        d_t = array.get(dem_tops, i)
+        d_b = array.get(dem_bots, i)
+        if m15_low <= d_t + m15_atr * eff_zone_tol and m15_low >= d_b - m15_atr * eff_zone_tol
+            price_at_demand := true
+
+sup_count = array.size(sup_tops)
+dem_count = array.size(dem_tops)
+
+// ─── SPIKE + CONFERMA ─────────────────────────────────────
+spike_up   = (m15_high - m15_low) >= m15_atr * eff_spike_mult and m15_high > m15_high[1]
+spike_down = (m15_high - m15_low) >= m15_atr * eff_spike_mult and m15_low  < m15_low[1]
+
+body_sell = m15_open - m15_close
+body_buy  = m15_close - m15_open
+
+confirm_sell = spike_up   and m15_close < m15_open and body_sell >= m15_atr * eff_body_mult
+confirm_buy  = spike_down and m15_close > m15_open and body_buy  >= m15_atr * eff_body_mult
+
+// ─── FILTRI ───────────────────────────────────────────────
+h_now       = hour(time, "Europe/Rome")
+session_ok  = h_now >= session_start and h_now < session_end
+hours_ok    = h_now >= start_hour and h_now < end_hour
+hour_ok     = eff_no_hour_limit ? true : eff_use_session ? session_ok : eff_force_hours ? hours_ok : (not use_hours or hours_ok)
+atr_ok      = not use_atr or atr_val >= atr_min
+adx_ok      = not use_adx or adx_val >= adx_threshold
+strong_sell_alignment = h1_bear and m15_bear and price_at_supply
+strong_buy_alignment  = h1_bull and m15_bull and price_at_demand
+rsi_ok_sell = strong_sell_alignment or (m15_rsi > 45 and m15_rsi < rsi_ob)
+rsi_ok_buy  = strong_buy_alignment  or (m15_rsi < 55 and m15_rsi > rsi_os)
+
+current_mins = h_now * 60 + minute(time, "Europe/Rome")
+in_news(_act, _h, _m) => _act and current_mins >= (_h*60+_m - news_before) and current_mins <= (_h*60+_m + news_after)
+in_news_any = in_news(news1_active, news1_hour, news1_min) or in_news(news2_active, news2_hour, news2_min) or in_news(news3_active, news3_hour, news3_min)
+news_ok     = not use_news or not in_news_any
+
+var int  last_close_bar    = 0
+var int  trades_today      = 0
+var bool last_trade_was_sl = false
+var int  win_streak        = 0
+var int  loss_streak       = 0
+var array<int> adp_win  = array.new<int>()
+var array<int> adp_side = array.new<int>()
+current_day = dayofmonth(time, "Europe/Rome")
+new_day = ta.change(current_day) != 0
+
+if new_day
+    trades_today := 0
+
+if strategy.position_size[1] != 0 and strategy.position_size == 0
+    last_close_bar := bar_index
+    trades_today   := trades_today + 1
+    if strategy.closedtrades > 0
+        _prof = strategy.closedtrades.profit(strategy.closedtrades - 1)
+        last_trade_was_sl := _prof < 0
+        if _prof > 0
+            win_streak  := win_streak + 1
+            loss_streak := 0
+        else
+            loss_streak := loss_streak + 1
+            win_streak  := 0
+        array.push(adp_win,  _prof > 0 ? 1 : 0)
+        array.push(adp_side, str.contains(strategy.closedtrades.entry_id(strategy.closedtrades - 1), "BUY") ? 1 : -1)
+        if array.size(adp_win) > adapt_window
+            array.shift(adp_win)
+            array.shift(adp_side)
+
+// ─── AUTO-ADATTIVO: regola la selettività in base ai risultati recenti ────
+adp_buy_n  = 0
+adp_buy_w  = 0
+adp_sell_n = 0
+adp_sell_w = 0
+if array.size(adp_win) > 0
+    for i = 0 to array.size(adp_win) - 1
+        if array.get(adp_side, i) == 1
+            adp_buy_n  := adp_buy_n + 1
+            adp_buy_w  := adp_buy_w + array.get(adp_win, i)
+        else
+            adp_sell_n := adp_sell_n + 1
+            adp_sell_w := adp_sell_w + array.get(adp_win, i)
+adp_buy_wr  = adp_buy_n  > 0 ? adp_buy_w  / adp_buy_n  * 100.0 : na
+adp_sell_wr = adp_sell_n > 0 ? adp_sell_w / adp_sell_n * 100.0 : na
+adp_steps       = math.min(loss_streak, adapt_max_steps)
+adapt_score_eff = use_adaptive ? math.min(eff_min_score + adp_steps * adapt_score_step, 95) : eff_min_score
+adapt_min_rr    = use_adaptive ? min_rr + adp_steps * adapt_rr_step : min_rr
+adapt_cd_extra  = use_adaptive ? adp_steps * adapt_cd_step : 0
+buy_pen  = use_adaptive and adp_buy_n  >= adapt_min_samples and adp_buy_wr  < adapt_weak_wr ? adapt_side_penalty : 0
+sell_pen = use_adaptive and adp_sell_n >= adapt_min_samples and adp_sell_wr < adapt_weak_wr ? adapt_side_penalty : 0
+
+extended_cd = (use_smart_cd and last_trade_was_sl ? math.max(eff_cooldown_bars, post_sl_cooldown) : eff_cooldown_bars) + adapt_cd_extra
+cooldown_ok = free_mode or (bar_index - last_close_bar) >= extended_cd
+trades_ok   = free_mode or not enable_max_trades or trades_today < eff_max_trades
+
+var float day_eq = na
+if new_day or na(day_eq)
+    day_eq := strategy.equity
+day_pct = (strategy.equity - day_eq) / day_eq * 100
+day_ok  = free_mode or (day_pct > -max_loss and day_pct < max_profit)
+
+// ─── CIRCUIT BREAKER DRAWDOWN ─────────────────────────────
+var float eq_peak       = na
+var int   pause_until_d = 0
+var int   day_counter   = 0
+if new_day
+    day_counter := day_counter + 1
+if na(eq_peak) or strategy.equity > eq_peak
+    eq_peak := strategy.equity
+dd_pct = eq_peak > 0 ? (eq_peak - strategy.equity) / eq_peak * 100 : 0.0
+if use_circuit and dd_pct >= dd_threshold and day_counter >= pause_until_d
+    pause_until_d := day_counter + pause_days
+circuit_ok = free_mode or not use_circuit or day_counter >= pause_until_d
+pause_left = math.max(0, pause_until_d - day_counter)
+
+// ─── PROBABILITÀ SETUP ────────────────────────────────────
+score_sell = 0
+score_buy  = 0
+score_sell := h1_bear ? score_sell + 25 : score_sell
+score_buy  := h1_bull ? score_buy + 25 : score_buy
+score_sell := m15_bear ? score_sell + 20 : score_sell
+score_buy  := m15_bull ? score_buy + 20 : score_buy
+score_sell := price_at_supply ? score_sell + 20 : score_sell
+score_buy  := price_at_demand ? score_buy + 20 : score_buy
+score_sell := rsi_ok_sell ? score_sell + 15 : score_sell
+score_buy  := rsi_ok_buy ? score_buy + 15 : score_buy
+vol_high = volume > ta.sma(volume, 20) * 1.2
+score_sell := vol_high ? score_sell + 10 : score_sell
+score_buy  := vol_high ? score_buy + 10 : score_buy
+score_sell := atr_ok ? score_sell + 10 : score_sell
+score_buy  := atr_ok ? score_buy + 10 : score_buy
+
+best_score = math.max(score_sell, score_buy)
+best_dir   = score_sell > score_buy ? "SELL" : score_buy > score_sell ? "BUY" : "─"
+setup_quality = best_score >= 80 ? "FORTE 🟢" : best_score >= 50 ? "MEDIO 🟡" : "DEBOLE 🔴"
+setup_color   = best_score >= 80 ? color.lime : best_score >= 50 ? color.yellow : color.red
+
+score_ok_sell = score_sell >= (adapt_score_eff + sell_pen)
+score_ok_buy  = score_buy  >= (adapt_score_eff + buy_pen)
+
+// ─── FILTRO RISK/REWARD ───────────────────────────────────
+rr_risk_buy  = close - (sl_low_anchor  - atr_val * eff_sl_atr_mult)
+rr_risk_sell = (sl_high_anchor + atr_val * eff_sl_atr_mult) - close
+rr_buy   = rr_risk_buy  > 0 ? (m15_struct_high - close) / rr_risk_buy  : 0.0
+rr_sell  = rr_risk_sell > 0 ? (close - m15_struct_low)  / rr_risk_sell : 0.0
+rr_ok_buy  = not use_rr or use_quick_tp or rr_buy  >= adapt_min_rr
+rr_ok_sell = not use_rr or use_quick_tp or rr_sell >= adapt_min_rr
+
+// ─── CORE SETUP per tipo strategia ────────────────────────
+use_zone = strategy_type == "Zone (retest)" or strategy_type == "Entrambe"
+use_tf   = strategy_type == "Trend-Following" or strategy_type == "Entrambe"
+zone_core_sell = confirm_sell and price_at_supply and h1_bear and m15_bear and rsi_ok_sell
+zone_core_buy  = confirm_buy  and price_at_demand and h1_bull and m15_bull and rsi_ok_buy
+ema_fast_c   = ta.ema(close, m15_fast)
+tf_not_ext_sell = (ema_fast_c - close) <= atr_val * tf_max_ext
+tf_not_ext_buy  = (close - ema_fast_c) <= atr_val * tf_max_ext
+tf_core_sell = h1_bear and m15_bear and (ta.crossunder(close, ema_fast_c) or (tf_use_momentum and confirm_sell)) and m15_rsi < 60 and tf_not_ext_sell
+tf_core_buy  = h1_bull and m15_bull and (ta.crossover(close,  ema_fast_c) or (tf_use_momentum and confirm_buy))  and m15_rsi > 40 and tf_not_ext_buy
+
+// ─── SEGNALI ──────────────────────────────────────────────
+common_ok = hour_ok and atr_ok and adx_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok
+can_open_buy  = multi_mode ? (strategy.position_size >= 0 and strategy.opentrades < max_open) : strategy.position_size == 0
+can_open_sell = multi_mode ? (strategy.position_size <= 0 and strategy.opentrades < max_open) : strategy.position_size == 0
+final_sell = ((use_zone and zone_core_sell and score_ok_sell) or (use_tf and tf_core_sell)) and rr_ok_sell and common_ok and can_open_sell
+
+final_buy  = ((use_zone and zone_core_buy and score_ok_buy) or (use_tf and tf_core_buy)) and rr_ok_buy and common_ok and can_open_buy
+
+// ─── POSITION SIZING DINAMICO ─────────────────────────────
 f_qty(_sl_dist) =>
     risk_cash = strategy.equity * (risk_pct / 100.0)
     _sl_dist > 0 ? risk_cash / _sl_dist : 0.0
 
-// ─── STATO POSIZIONE ───────────────────────────────────────
-var float pos_sl    = na
-var float pos_tp1   = na
-var float pos_tp2   = na
-var float pos_entry = na
-var int   pos_dir   = 0
+// ─── ENTRY + SL/TP ────────────────────────────────────────
+var float sl_buy   = na
+var float tp1_buy  = na
+var float tp2_buy  = na
+var float sl_sell  = na
+var float tp1_sell = na
+var float tp2_sell = na
+var float entry_px = na
 var bool  be_active = false
-var float trail_sl  = na
-var int   last_buy_bar  = 0
-var int   last_sell_bar = 0
-var box b_tp = na
-var box b_sl = na
+var int last_buy_bar  = 0
+var int last_sell_bar = 0
+var box tp1_box = na
+var box tp2_box = na
+var box sl_box  = na
 
-// ─── ENTRATE ───────────────────────────────────────────────
-if buy_signal
-    pos_entry := close
-    pos_sl    := sl_buy_calc
-    pos_tp1   := close + tp1_r * risk_buy
-    pos_tp2   := range_high
-    pos_dir   := 1
+// ─── ENTRATA SU PULLBACK (ordine limite verso il bordo della zona) ───
+var bool  pend_active = false
+var int   pend_dir    = 0
+var int   pend_bar    = 0
+var float pend_limit  = na
+var float pend_slv    = na
+var float pend_tp1v   = na
+var float pend_tp2v   = na
+
+// In multi-mode l'entrata su pullback (un ordine in attesa alla volta) non è
+// compatibile coi trade sovrapposti → si usano entrate a mercato.
+eff_use_pullback = use_pullback and not multi_mode
+
+if eff_use_pullback and strategy.position_size == 0 and not pend_active and (final_buy or final_sell)
+    _isbuy = final_buy
+    _lim   = _isbuy ? close - atr_val * pullback_atr : close + atr_val * pullback_atr
+    _slv   = _isbuy ? sl_low_anchor - atr_val * eff_sl_atr_mult : sl_high_anchor + atr_val * eff_sl_atr_mult
+    _t1    = use_quick_tp ? (_isbuy ? _lim + tp1_r * (_lim - _slv) : _lim - tp1_r * (_slv - _lim)) : (_isbuy ? m15_struct_high : m15_struct_low)
+    _t2    = _isbuy ? h1_struct_high  : h1_struct_low
+    _ok    = _isbuy ? (_slv < _lim and _lim < _t1) : (_slv > _lim and _lim > _t1)
+    if _ok
+        pend_active := true
+        pend_dir    := _isbuy ? 1 : -1
+        pend_bar    := bar_index
+        pend_limit  := _lim
+        pend_slv    := _slv
+        pend_tp1v   := _t1
+        pend_tp2v   := _t2
+        if show_pullback_line
+            _pc = _isbuy ? color.lime : color.red
+            line.new(bar_index, _lim, bar_index + pullback_expiry, _lim, color=_pc, style=line.style_dashed, width=1)
+            label.new(bar_index, _lim, "⏳ " + (_isbuy ? "BUY" : "SELL") + " " + str.tostring(math.round(_lim, 2)), style=_isbuy ? label.style_label_up : label.style_label_down, color=color.new(_pc, 75), textcolor=_pc, size=size.tiny)
+
+if eff_use_pullback and pend_active and strategy.position_size == 0
+    _expired = bar_index - pend_bar >= pullback_expiry
+    if not _expired
+        if pend_dir == 1
+            strategy.entry("BUY", strategy.long, qty=f_qty(pend_limit - pend_slv), limit=pend_limit)
+            strategy.exit("BUY_EXIT", from_entry="BUY", stop=pend_slv, limit=pend_tp2v)
+        else
+            strategy.entry("SELL", strategy.short, qty=f_qty(pend_slv - pend_limit), limit=pend_limit)
+            strategy.exit("SELL_EXIT", from_entry="SELL", stop=pend_slv, limit=pend_tp2v)
+    else
+        strategy.cancel("BUY")
+        strategy.cancel("SELL")
+        if pullback_fallback and pend_dir == 1
+            pend_slv  := sl_low_anchor - atr_val * eff_sl_atr_mult
+            pend_tp1v := use_quick_tp ? close + tp1_r * (close - pend_slv) : m15_struct_high
+            pend_tp2v := h1_struct_high
+            if pend_slv < close and close < pend_tp1v
+                strategy.entry("BUY", strategy.long, qty=f_qty(close - pend_slv))
+                strategy.exit("BUY_EXIT", from_entry="BUY", stop=pend_slv, limit=pend_tp2v)
+            else
+                pend_active := false
+        else if pullback_fallback and pend_dir == -1
+            pend_slv  := sl_high_anchor + atr_val * eff_sl_atr_mult
+            pend_tp1v := use_quick_tp ? close - tp1_r * (pend_slv - close) : m15_struct_low
+            pend_tp2v := h1_struct_low
+            if pend_slv > close and close > pend_tp1v
+                strategy.entry("SELL", strategy.short, qty=f_qty(pend_slv - close))
+                strategy.exit("SELL_EXIT", from_entry="SELL", stop=pend_slv, limit=pend_tp2v)
+            else
+                pend_active := false
+        else
+            pend_active := false
+
+if eff_use_pullback and pend_active and strategy.position_size != 0
+    pend_active := false
+    entry_px := strategy.position_avg_price
     be_active := false
+    last_trade_was_sl := false
+    box.delete(tp1_box), box.delete(tp2_box), box.delete(sl_box)
+    if pend_dir == 1
+        last_buy_bar := bar_index
+        sl_buy  := pend_slv
+        tp1_buy := pend_tp1v
+        tp2_buy := pend_tp2v
+        strategy.exit("BUY_EXIT", from_entry="BUY", stop=sl_buy, limit=tp2_buy)
+        tp2_box := box.new(bar_index, tp1_buy, bar_index+50, tp2_buy, bgcolor=color.new(color.green,50), border_color=color.new(color.green,20))
+        tp1_box := box.new(bar_index, entry_px, bar_index+50, tp1_buy, bgcolor=color.new(color.green,70), border_color=color.new(color.green,40))
+        sl_box  := box.new(bar_index, sl_buy, bar_index+50, entry_px, bgcolor=color.new(color.red,70), border_color=color.new(color.red,30))
+        alert("🟢 GoldBot BUY XAUUSD (pullback)\nEntry: " + str.tostring(entry_px,"#.##") + "\nSL: " + str.tostring(sl_buy,"#.##") + "\nTP1: " + str.tostring(tp1_buy,"#.##") + "\nTP2: " + str.tostring(tp2_buy,"#.##") + "\nMode: " + mode, alert.freq_once_per_bar_close)
+    else
+        last_sell_bar := bar_index
+        sl_sell  := pend_slv
+        tp1_sell := pend_tp1v
+        tp2_sell := pend_tp2v
+        strategy.exit("SELL_EXIT", from_entry="SELL", stop=sl_sell, limit=tp2_sell)
+        tp2_box := box.new(bar_index, tp2_sell, bar_index+50, tp1_sell, bgcolor=color.new(color.green,50), border_color=color.new(color.green,20))
+        tp1_box := box.new(bar_index, tp1_sell, bar_index+50, entry_px, bgcolor=color.new(color.green,70), border_color=color.new(color.green,40))
+        sl_box  := box.new(bar_index, entry_px, bar_index+50, sl_sell, bgcolor=color.new(color.red,70), border_color=color.new(color.red,30))
+        alert("🔴 GoldBot SELL XAUUSD (pullback)\nEntry: " + str.tostring(entry_px,"#.##") + "\nSL: " + str.tostring(sl_sell,"#.##") + "\nTP1: " + str.tostring(tp1_sell,"#.##") + "\nTP2: " + str.tostring(tp2_sell,"#.##") + "\nMode: " + mode, alert.freq_once_per_bar_close)
+
+if not eff_use_pullback and final_buy
     last_buy_bar := bar_index
-    swept_dir := 0
-    strategy.entry("LONG", strategy.long, qty=f_qty(risk_buy))
-    strategy.exit("LONG_X", from_entry="LONG", stop=pos_sl, limit=pos_tp2)
-    if show_levels
-        box.delete(b_tp), box.delete(b_sl)
-        b_tp := box.new(bar_index, pos_entry, bar_index+40, pos_tp2, bgcolor=color.new(color.green,80), border_color=color.new(color.green,40))
-        b_sl := box.new(bar_index, pos_sl,    bar_index+40, pos_entry, bgcolor=color.new(color.red,80),  border_color=color.new(color.red,40))
-    alert("🟢 GoldBot AMD BUY\nEntry: " + str.tostring(pos_entry,"#.##") + "\nSL: " + str.tostring(pos_sl,"#.##") + "\nTP1: " + str.tostring(pos_tp1,"#.##") + "\nTP2: " + str.tostring(pos_tp2,"#.##"), alert.freq_once_per_bar_close)
-
-if sell_signal
-    pos_entry := close
-    pos_sl    := sl_sell_calc
-    pos_tp1   := close - tp1_r * risk_sell
-    pos_tp2   := range_low
-    pos_dir   := -1
+    sl_buy   := sl_low_anchor - atr_val * eff_sl_atr_mult
+    tp1_buy  := use_quick_tp ? close + tp1_r * (close - sl_buy) : m15_struct_high
+    tp2_buy  := h1_struct_high
+    entry_px := close
     be_active := false
+    last_trade_was_sl := false
+    qty      = f_qty(close - sl_buy)
+    strategy.entry("BUY", strategy.long, qty=qty)
+    strategy.exit("BUY_EXIT", from_entry="BUY", stop=sl_buy, limit=tp2_buy)
+    box.delete(tp1_box), box.delete(tp2_box), box.delete(sl_box)
+    tp2_box := box.new(bar_index, tp1_buy, bar_index+50, tp2_buy, bgcolor=color.new(color.green,50), border_color=color.new(color.green,20))
+    tp1_box := box.new(bar_index, close,   bar_index+50, tp1_buy, bgcolor=color.new(color.green,70), border_color=color.new(color.green,40))
+    sl_box  := box.new(bar_index, sl_buy,  bar_index+50, close,   bgcolor=color.new(color.red,70),   border_color=color.new(color.red,30))
+    alert("🟢 GoldBot BUY XAUUSD" +
+          "\nEntry: "  + str.tostring(close,   "#.##") +
+          "\nSL: "     + str.tostring(sl_buy,  "#.##") +
+          "\nTP1: "    + str.tostring(tp1_buy, "#.##") +
+          "\nTP2: "    + str.tostring(tp2_buy, "#.##") +
+          "\nScore: "  + str.tostring(score_buy) +
+          "\nMode: "   + mode, alert.freq_once_per_bar_close)
+
+if not eff_use_pullback and final_sell
     last_sell_bar := bar_index
-    swept_dir := 0
-    strategy.entry("SHORT", strategy.short, qty=f_qty(risk_sell))
-    strategy.exit("SHORT_X", from_entry="SHORT", stop=pos_sl, limit=pos_tp2)
-    if show_levels
-        box.delete(b_tp), box.delete(b_sl)
-        b_tp := box.new(bar_index, pos_tp2,    bar_index+40, pos_entry, bgcolor=color.new(color.green,80), border_color=color.new(color.green,40))
-        b_sl := box.new(bar_index, pos_entry,  bar_index+40, pos_sl, bgcolor=color.new(color.red,80),  border_color=color.new(color.red,40))
-    alert("🔴 GoldBot AMD SELL\nEntry: " + str.tostring(pos_entry,"#.##") + "\nSL: " + str.tostring(pos_sl,"#.##") + "\nTP1: " + str.tostring(pos_tp1,"#.##") + "\nTP2: " + str.tostring(pos_tp2,"#.##"), alert.freq_once_per_bar_close)
+    sl_sell  := sl_high_anchor + atr_val * eff_sl_atr_mult
+    tp1_sell := use_quick_tp ? close - tp1_r * (sl_sell - close) : m15_struct_low
+    tp2_sell := h1_struct_low
+    entry_px := close
+    be_active := false
+    last_trade_was_sl := false
+    qty      = f_qty(sl_sell - close)
+    strategy.entry("SELL", strategy.short, qty=qty)
+    strategy.exit("SELL_EXIT", from_entry="SELL", stop=sl_sell, limit=tp2_sell)
+    box.delete(tp1_box), box.delete(tp2_box), box.delete(sl_box)
+    tp2_box := box.new(bar_index, tp2_sell, bar_index+50, tp1_sell, bgcolor=color.new(color.green,50), border_color=color.new(color.green,20))
+    tp1_box := box.new(bar_index, tp1_sell, bar_index+50, close,    bgcolor=color.new(color.green,70), border_color=color.new(color.green,40))
+    sl_box  := box.new(bar_index, close,    bar_index+50, sl_sell,  bgcolor=color.new(color.red,70),   border_color=color.new(color.red,30))
+    alert("🔴 GoldBot SELL XAUUSD" +
+          "\nEntry: "  + str.tostring(close,    "#.##") +
+          "\nSL: "     + str.tostring(sl_sell,  "#.##") +
+          "\nTP1: "    + str.tostring(tp1_sell, "#.##") +
+          "\nTP2: "    + str.tostring(tp2_sell, "#.##") +
+          "\nScore: "  + str.tostring(score_sell) +
+          "\nMode: "   + mode, alert.freq_once_per_bar_close)
 
-// ─── TP1 PARZIALE + BREAK-EVEN + TRAILING ──────────────────
-if strategy.position_size > 0 and not be_active and not na(pos_tp1) and high >= pos_tp1
-    strategy.close("LONG", qty_percent=tp1_pct, comment="TP1")
+// ─── PARZIALE A TP1 + BREAK-EVEN + TRAILING ───────────────
+var float trail_sl = na
+
+if strategy.position_size > 0 and not be_active and not na(tp1_buy) and high >= tp1_buy
+    strategy.close("BUY", qty_percent=tp1_pct, comment="TP1")
     if use_be
         be_active := true
-        trail_sl  := pos_entry
-        strategy.exit("LONG_X", from_entry="LONG", stop=trail_sl, limit=pos_tp2)
+        trail_sl := entry_px
+        strategy.exit("BUY_EXIT", from_entry="BUY", stop=trail_sl, limit=tp2_buy)
 
-if strategy.position_size < 0 and not be_active and not na(pos_tp1) and low <= pos_tp1
-    strategy.close("SHORT", qty_percent=tp1_pct, comment="TP1")
+if strategy.position_size < 0 and not be_active and not na(tp1_sell) and low <= tp1_sell
+    strategy.close("SELL", qty_percent=tp1_pct, comment="TP1")
     if use_be
         be_active := true
-        trail_sl  := pos_entry
-        strategy.exit("SHORT_X", from_entry="SHORT", stop=trail_sl, limit=pos_tp2)
+        trail_sl := entry_px
+        strategy.exit("SELL_EXIT", from_entry="SELL", stop=trail_sl, limit=tp2_sell)
 
 if use_trail and be_active
     if strategy.position_size > 0 and not na(trail_sl)
-        new_sl = close - atr * trail_mult
+        new_sl = close - atr_val * trail_mult
         if new_sl > trail_sl
             trail_sl := new_sl
-            strategy.exit("LONG_X", from_entry="LONG", stop=trail_sl, limit=pos_tp2)
+            strategy.exit("BUY_EXIT", from_entry="BUY", stop=trail_sl, limit=tp2_buy)
     if strategy.position_size < 0 and not na(trail_sl)
-        new_sl = close + atr * trail_mult
+        new_sl = close + atr_val * trail_mult
         if new_sl < trail_sl
             trail_sl := new_sl
-            strategy.exit("SHORT_X", from_entry="SHORT", stop=trail_sl, limit=pos_tp2)
+            strategy.exit("SELL_EXIT", from_entry="SELL", stop=trail_sl, limit=tp2_sell)
 
 if strategy.position_size == 0
-    trail_sl  := na
+    trail_sl := na
     be_active := false
 
-// ─── GRAFICA ───────────────────────────────────────────────
-plot(show_levels ? range_high : na, "Range High", color=color.new(color.gray, 30), style=plot.style_linebr)
-plot(show_levels ? range_low  : na, "Range Low",  color=color.new(color.gray, 30), style=plot.style_linebr)
-plot(use_bias ? ema_bias : na, "EMA bias", color=color.new(color.orange, 50))
+// ─── DEBUG VISIVO ────────────────────────────────────────
+show_debug = input.bool(true, "Mostra debug filtri sulla candela corrente", group="Debug")
 
-plotshape(sweep_low_now,  title="Sweep basso",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.aqua,0),   size=size.tiny, text="sw")
-plotshape(sweep_high_now, title="Sweep alto",   style=shape.triangledown, location=location.abovebar, color=color.new(color.orange,0), size=size.tiny, text="sw")
-plotshape(bar_index == last_buy_bar,  title="BUY",  style=shape.labelup,   location=location.belowbar, color=color.lime, textcolor=color.black, size=size.normal, text="BUY")
-plotshape(bar_index == last_sell_bar, title="SELL", style=shape.labeldown, location=location.abovebar, color=color.red,  textcolor=color.white, size=size.normal, text="SELL")
+var label dbg_label = na
+if barstate.islast and show_debug
+    label.delete(dbg_label)
+    sell_reasons = ""
+    buy_reasons  = ""
+    sell_reasons := sell_reasons + (confirm_sell    ? "✅" : "❌") + " Spike+Body SELL\n"
+    sell_reasons := sell_reasons + (price_at_supply ? "✅" : "❌") + " Zona Supply attiva\n"
+    sell_reasons := sell_reasons + (h1_bear         ? "✅" : "❌") + " H1 ribassista\n"
+    sell_reasons := sell_reasons + (m15_bear        ? "✅" : "❌") + " M15 ribassista\n"
+    sell_reasons := sell_reasons + (rsi_ok_sell     ? "✅" : "❌") + " RSI ok (" + str.tostring(math.round(m15_rsi,1)) + ")\n"
+    sell_reasons := sell_reasons + (score_ok_sell   ? "✅" : "❌") + " Score " + str.tostring(score_sell) + "/" + str.tostring(adapt_score_eff + sell_pen) + "\n"
+    sell_reasons := sell_reasons + (rr_ok_sell      ? "✅" : "❌") + " R:R " + str.tostring(math.round(rr_sell,2)) + "/" + str.tostring(math.round(adapt_min_rr,2)) + "\n"
+    buy_reasons := buy_reasons + (confirm_buy     ? "✅" : "❌") + " Spike+Body BUY\n"
+    buy_reasons := buy_reasons + (price_at_demand ? "✅" : "❌") + " Zona Demand attiva\n"
+    buy_reasons := buy_reasons + (h1_bull         ? "✅" : "❌") + " H1 rialzista\n"
+    buy_reasons := buy_reasons + (m15_bull        ? "✅" : "❌") + " M15 rialzista\n"
+    buy_reasons := buy_reasons + (rsi_ok_buy      ? "✅" : "❌") + " RSI ok (" + str.tostring(math.round(m15_rsi,1)) + ")\n"
+    buy_reasons := buy_reasons + (score_ok_buy    ? "✅" : "❌") + " Score " + str.tostring(score_buy) + "/" + str.tostring(adapt_score_eff + buy_pen) + "\n"
+    buy_reasons := buy_reasons + (rr_ok_buy       ? "✅" : "❌") + " R:R " + str.tostring(math.round(rr_buy,2)) + "/" + str.tostring(math.round(adapt_min_rr,2)) + "\n"
+    common = ""
+    common := common + (hour_ok     ? "✅" : "❌") + " Orario\n"
+    common := common + (atr_ok      ? "✅" : "❌") + " ATR (" + str.tostring(math.round(atr_val,2)) + ")\n"
+    common := common + (adx_ok      ? "✅" : "❌") + " ADX " + str.tostring(math.round(adx_val,1)) + "/" + str.tostring(adx_threshold) + "\n"
+    common := common + (news_ok     ? "✅" : "❌") + " Notizie\n"
+    common := common + (cooldown_ok ? "✅" : "❌") + " Cooldown (" + str.tostring(bar_index - last_close_bar) + "/" + str.tostring(extended_cd) + ")" + (last_trade_was_sl ? " 🛑post-SL" : "") + "\n"
+    common := common + (trades_ok   ? "✅" : "❌") + " Trade " + str.tostring(trades_today) + "/" + str.tostring(eff_max_trades) + "\n"
+    common := common + (day_ok      ? "✅" : "❌") + " P&L giorno (" + str.tostring(math.round(day_pct,2)) + "%)\n"
+    common := common + (circuit_ok  ? "✅" : "❌") + " Circuit breaker\n"
+    common := common + (is_high_vol ? "⚡" : "🟢") + " Volatilità " + (is_high_vol ? "ALTA (SL " + str.tostring(eff_sl_atr_mult, "#.##") + " ATR)" : "normale") + "\n"
+    streak_txt = loss_streak > 0 ? "−" + str.tostring(loss_streak) : win_streak > 0 ? "+" + str.tostring(win_streak) : "0"
+    common := common + (use_adaptive ? "🧠" : "⚪") + " Adattivo streak " + streak_txt + " → score≥" + str.tostring(adapt_score_eff) + " R:R≥" + str.tostring(math.round(adapt_min_rr,2)) + "\n"
+    common := common + "   WR recenti: BUY " + (na(adp_buy_wr) ? "n/d" : str.tostring(math.round(adp_buy_wr)) + "%" + (buy_pen > 0 ? " 🔻" : "")) + " | SELL " + (na(adp_sell_wr) ? "n/d" : str.tostring(math.round(adp_sell_wr)) + "%" + (sell_pen > 0 ? " 🔻" : "")) + "\n"
+    common := common + (use_pullback and pend_active ? "⏳ Ordine pullback " + (pend_dir == 1 ? "BUY" : "SELL") + " @ " + str.tostring(math.round(pend_limit,2)) + " (scade " + str.tostring(math.max(0, pullback_expiry - (bar_index - pend_bar))) + "b)\n" : "")
+    common := common + "🎯 " + strategy_type + (use_tf ? " | TF: BUY " + (tf_core_buy ? "✅" : "❌") + " SELL " + (tf_core_sell ? "✅" : "❌") : "") + (multi_mode ? " | ♾️ " + str.tostring(strategy.opentrades) + "/" + str.tostring(max_open) : "") + "\n"
+    flat = strategy.position_size == 0
+    pos_status = flat ? "✅ Flat (può entrare)" : "❌ Posizione aperta"
+    title = final_buy ? "🟢 ENTRATA BUY!" : final_sell ? "🔴 ENTRATA SELL!" : "⏸️ NESSUNA ENTRATA"
+    txt = title + "\n──── FILTRI COMUNI ────\n" + common + pos_status + "\n──── BUY ────\n" + buy_reasons + "──── SELL ────\n" + sell_reasons
+    dbg_label := label.new(bar_index, high + atr_val * 2, txt, style=label.style_label_left, color=color.new(color.black, 15), textcolor=color.white, size=size.small)
 
-// ─── PANNELLO STATO ────────────────────────────────────────
-var table p = table.new(position.middle_left, 2, 8, bgcolor=color.new(color.black,70), border_width=1, border_color=color.new(color.yellow,60))
+// ─── PLOT ────────────────────────────────────────────────
+plot(h1_ef,  "EMA21 H1",  color=color.new(color.blue,   40), linewidth=2, display=display.none)
+plot(h1_es,  "EMA55 H1",  color=color.new(color.purple, 40), linewidth=2, display=display.none)
+plot(m15_ef, "EMA21 M15", color=color.new(color.aqua,   40), linewidth=1, display=display.none)
+plot(m15_es, "EMA55 M15", color=color.new(color.orange, 40), linewidth=1, display=display.none)
+
+plot_sl_buy_v   = final_buy  ? sl_low_anchor  - atr_val * eff_sl_atr_mult : na
+plot_tp1_buy_v  = final_buy  ? m15_struct_high : na
+plot_tp2_buy_v  = final_buy  ? h1_struct_high  : na
+plot_sl_sell_v  = final_sell ? sl_high_anchor + atr_val * eff_sl_atr_mult : na
+plot_tp1_sell_v = final_sell ? m15_struct_low  : na
+plot_tp2_sell_v = final_sell ? h1_struct_low   : na
+plot(plot_sl_buy_v,   "SL Buy",     display=display.none)
+plot(plot_tp1_buy_v,  "TP1 Buy",    display=display.none)
+plot(plot_tp2_buy_v,  "TP2 Buy",    display=display.none)
+plot(score_buy,       "Score Buy",  display=display.none)
+plot(plot_sl_sell_v,  "SL Sell",    display=display.none)
+plot(plot_tp1_sell_v, "TP1 Sell",   display=display.none)
+plot(plot_tp2_sell_v, "TP2 Sell",   display=display.none)
+plot(score_sell,      "Score Sell", display=display.none)
+
+plotshape(final_sell, title="Conf SELL", style=shape.triangledown, location=location.abovebar, color=color.new(color.orange,0), size=size.small, text="CS")
+plotshape(final_buy,  title="Conf BUY",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.yellow,0), size=size.small, text="CB")
+plotshape(bar_index == last_buy_bar,  title="BUY",  style=shape.triangleup,   location=location.belowbar, color=color.lime, size=size.large, text="BUY")
+plotshape(bar_index == last_sell_bar, title="SELL", style=shape.triangledown, location=location.abovebar, color=color.red,  size=size.large, text="SELL")
+bgcolor(not news_ok ? color.new(color.orange,90) : na)
+
+// ─── NEAR-MISS MARKERS ──────────────────────────────────
+show_misses = input.bool(true, "Mostra near-miss (setup quasi entrato)", group="Debug")
+
+near_miss_sell = show_misses and not final_sell and strategy.position_size == 0 and score_sell >= eff_min_score and h1_bear and m15_bear and price_at_supply and hour_ok and adx_ok and not confirm_sell
+near_miss_buy  = show_misses and not final_buy  and strategy.position_size == 0 and score_buy  >= eff_min_score and h1_bull and m15_bull and price_at_demand and hour_ok and adx_ok and not confirm_buy
+
+plotchar(near_miss_sell, title="Near-miss SELL", char="✕", location=location.abovebar, color=color.new(color.orange, 30), size=size.tiny)
+plotchar(near_miss_buy,  title="Near-miss BUY",  char="✕", location=location.belowbar, color=color.new(color.aqua,   30), size=size.tiny)
+
+// ─── ALERT ────────────────────────────────────────────────
+alertcondition(final_buy,  title="GoldBot BUY",  message="🟢 GoldBot BUY {{ticker}} {{interval}}\nEntry: {{close}}\nSL: {{plot_4}}\nTP1: {{plot_5}}\nTP2: {{plot_6}}\nScore: {{plot_7}}")
+alertcondition(final_sell, title="GoldBot SELL", message="🔴 GoldBot SELL {{ticker}} {{interval}}\nEntry: {{close}}\nSL: {{plot_8}}\nTP1: {{plot_9}}\nTP2: {{plot_10}}\nScore: {{plot_11}}")
+
+// ─── TABELLA ──────────────────────────────────────────────
+var table t = table.new(position.middle_left, 2, 22, bgcolor=color.new(color.black,70), border_width=1, border_color=color.new(color.yellow,60))
+
+filter_status(cond) => cond ? "✅" : "❌"
+
+sl_display  = strategy.position_size != 0 and not na(trail_sl) ? str.tostring(math.round(trail_sl,2)) : strategy.position_size > 0 ? str.tostring(math.round(sl_buy,2))   : strategy.position_size < 0 ? str.tostring(math.round(sl_sell,2))  : "─"
+tp1_display = strategy.position_size > 0 ? str.tostring(math.round(tp1_buy,2))  : strategy.position_size < 0 ? str.tostring(math.round(tp1_sell,2)) : "─"
+tp2_display = strategy.position_size > 0 ? str.tostring(math.round(tp2_buy,2))  : strategy.position_size < 0 ? str.tostring(math.round(tp2_sell,2)) : "─"
+supply_display = sup_count > 0 ? str.tostring(sup_count) + " attive (ultima: " + str.tostring(math.round(array.get(sup_bots, sup_count-1),2)) + "-" + str.tostring(math.round(array.get(sup_tops, sup_count-1),2)) + ")" : "─"
+demand_display = dem_count > 0 ? str.tostring(dem_count) + " attive (ultima: " + str.tostring(math.round(array.get(dem_bots, dem_count-1),2)) + "-" + str.tostring(math.round(array.get(dem_tops, dem_count-1),2)) + ")" : "─"
+
 if barstate.islast
-    table.cell(p, 0, 0, "GoldBot AMD x iFVG", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.black,50))
-    table.cell(p, 1, 0, "", bgcolor=color.new(color.black,50))
-    table.cell(p, 0, 1, "Range", text_color=color.gray, text_size=size.tiny)
-    table.cell(p, 1, 1, str.tostring(math.round(range_low,2)) + " - " + str.tostring(math.round(range_high,2)), text_color=color.silver, text_size=size.tiny)
-    table.cell(p, 0, 2, "Sweep", text_color=color.gray, text_size=size.tiny)
-    sweep_txt = not sweep_fresh ? "─ nessuno" : swept_dir == 1 ? "🔻 BASSO -> cerca BUY" : "🔺 ALTO -> cerca SELL"
-    table.cell(p, 1, 2, sweep_txt, text_color=sweep_fresh ? color.aqua : color.gray, text_size=size.tiny)
-    table.cell(p, 0, 3, "FVG", text_color=color.gray, text_size=size.tiny)
-    table.cell(p, 1, 3, (bull_fvg ? "🟢 rialzista" : bear_fvg ? "🔴 ribassista" : "─"), text_color=bull_fvg ? color.lime : bear_fvg ? color.red : color.gray, text_size=size.tiny)
-    table.cell(p, 0, 4, "Bias EMA" + str.tostring(bias_len), text_color=color.gray, text_size=size.tiny)
-    table.cell(p, 1, 4, use_bias ? (close > ema_bias ? "RIALZO ▲" : "RIBASSO ▼") : "OFF", text_color=use_bias ? (close > ema_bias ? color.lime : color.red) : color.gray, text_size=size.tiny)
-    table.cell(p, 0, 5, "Orario", text_color=color.gray, text_size=size.tiny)
-    table.cell(p, 1, 5, sess_ok ? "✅ aperto" : "🛑 chiuso", text_color=sess_ok ? color.lime : color.orange, text_size=size.tiny)
-    table.cell(p, 0, 6, "Posizione", text_color=color.gray, text_size=size.tiny)
+    mode_badge = (is_quality_24h ? " 💎" : is_aggressive ? " ⚡" : is_extended ? " 🕐" : "") + (use_adaptive ? " 🧠" : "") + (multi_mode ? " ♾️" : "")
+    table.cell(t, 0, 0,  "GoldBot v5.2" + mode_badge,  text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.black,50))
+    table.cell(t, 0, 1,  "H1 Trend",      text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 1,  h1_bull ? "RIALZISTA ▲" : "RIBASSISTA ▼", text_color=h1_bull ? color.lime : color.red, text_size=size.tiny)
+    table.cell(t, 0, 2,  "M15 Trend",     text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 2,  m15_bull ? "BUY ZONE" : "SELL ZONE", text_color=m15_bull ? color.lime : color.red, text_size=size.tiny)
+    table.cell(t, 0, 3,  "RSI / ADX",     text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 3,  str.tostring(math.round(m15_rsi,1)) + " / " + str.tostring(math.round(adx_val,1)) + (is_high_vol ? " ⚡" : ""), text_color=adx_ok ? color.lime : color.orange, text_size=size.tiny)
+    table.cell(t, 0, 4,  "Supply Zones",  text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 4,  supply_display,  text_color=sup_count > 0 ? color.red : color.gray, text_size=size.tiny)
+    table.cell(t, 0, 5,  "Demand Zones",  text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 5,  demand_display,  text_color=dem_count > 0 ? color.lime : color.gray, text_size=size.tiny)
+    table.cell(t, 0, 6,  "Notizie",       text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 6,  news_ok ? "LIBERO ✅" : "PAUSA 🔴", text_color=news_ok ? color.lime : color.red, text_size=size.tiny)
+    sess_label = eff_use_session ? "Sessione" : eff_force_hours ? "Orario 8-20" : "Orario"
+    sess_value = hour_ok ? (eff_use_session ? "OVERLAP ✅" : "ATTIVO ✅") : "CHIUSO"
+    table.cell(t, 0, 7,  sess_label, text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 7,  sess_value, text_color=hour_ok ? color.lime : color.orange, text_size=size.tiny)
+    table.cell(t, 0, 8,  "P&L Oggi",      text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 8,  str.tostring(math.round(day_pct,2)) + "%", text_color=day_pct >= 0 ? color.lime : color.red, text_size=size.tiny)
+    table.cell(t, 0, 9,  "Trade Oggi",    text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 9,  str.tostring(trades_today) + "/" + str.tostring(eff_max_trades), text_color=trades_ok ? color.lime : color.orange, text_size=size.tiny)
+    table.cell(t, 0, 10, "SL/TP1/TP2",    text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 10, sl_display + "/" + tp1_display + "/" + tp2_display, text_color=color.silver, text_size=size.tiny)
     pos_tag = be_active ? (use_trail ? " TRAIL" : " BE") : ""
-    table.cell(p, 1, 6, strategy.position_size > 0 ? "LONG 🟢" + pos_tag : strategy.position_size < 0 ? "SHORT 🔴" + pos_tag : "FLAT ⚪", text_color=strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.white, text_size=size.tiny)
-    table.cell(p, 0, 7, "SL / TP1 / TP2", text_color=color.gray, text_size=size.tiny)
-    sl_d  = strategy.position_size != 0 and not na(trail_sl) ? str.tostring(math.round(trail_sl,2)) : not na(pos_sl) and strategy.position_size != 0 ? str.tostring(math.round(pos_sl,2)) : "─"
-    tp1_d = strategy.position_size != 0 ? str.tostring(math.round(pos_tp1,2)) : "─"
-    tp2_d = strategy.position_size != 0 ? str.tostring(math.round(pos_tp2,2)) : "─"
-    table.cell(p, 1, 7, sl_d + " / " + tp1_d + " / " + tp2_d, text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 0, 11, "Posizione",     text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 11, strategy.position_size > 0 ? "LONG 🟢" + pos_tag : strategy.position_size < 0 ? "SHORT 🔴" + pos_tag : "FLAT ⚪", text_color=strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.white, text_size=size.tiny)
+    table.cell(t, 0, 12, "DD / Status",   text_color=color.gray, text_size=size.tiny)
+    circuit_txt = circuit_ok ? ("ACTIVE ✅  " + str.tostring(math.round(dd_pct,1)) + "%") : ("PAUSED 🛑 " + str.tostring(pause_left) + "g")
+    table.cell(t, 1, 12, circuit_txt, text_color=circuit_ok ? color.lime : color.red, text_size=size.tiny)
+    table.cell(t, 0, 13, "Setup",         text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 13, setup_quality + " (" + str.tostring(best_score) + ") " + best_dir, text_color=setup_color, text_size=size.tiny)
+    table.cell(t, 0, 14, "── SELL ──",    text_color=color.red,  text_size=size.tiny, bgcolor=color.new(color.black,50))
+    table.cell(t, 1, 14, "",              text_color=color.red,  text_size=size.tiny, bgcolor=color.new(color.black,50))
+    table.cell(t, 0, 15, "H1 bear",       text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 15, filter_status(h1_bear), text_color=h1_bear ? color.lime : color.red, text_size=size.tiny)
+    table.cell(t, 0, 16, "Zona Supply",   text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 16, filter_status(price_at_supply), text_color=price_at_supply ? color.lime : color.red, text_size=size.tiny)
+    table.cell(t, 0, 17, "Spike + Conf",  text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 17, filter_status(confirm_sell), text_color=confirm_sell ? color.lime : color.red, text_size=size.tiny)
+    table.cell(t, 0, 18, "── BUY ──",     text_color=color.lime, text_size=size.tiny, bgcolor=color.new(color.black,50))
+    table.cell(t, 1, 18, "",              text_color=color.lime, text_size=size.tiny, bgcolor=color.new(color.black,50))
+    table.cell(t, 0, 19, "H1 bull",       text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 19, filter_status(h1_bull), text_color=h1_bull ? color.lime : color.red, text_size=size.tiny)
+    table.cell(t, 0, 20, "Zona Demand",   text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 20, filter_status(price_at_demand), text_color=price_at_demand ? color.lime : color.red, text_size=size.tiny)
+    table.cell(t, 0, 21, "Spike + Conf",  text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 21, filter_status(confirm_buy), text_color=confirm_buy ? color.lime : color.red, text_size=size.tiny)
 
-// ─── TABELLA STATISTICHE BACKTEST ──────────────────────────
+// ─── TABELLA STATISTICHE BACKTEST ────────────────────────
 var table stats = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black,70), border_width=1, border_color=color.new(color.aqua,60))
+
 if barstate.islast
     closed     = strategy.closedtrades
     wins       = strategy.wintrades
@@ -237,34 +749,37 @@ if barstate.islast
     net_pct    = strategy.initial_capital > 0 ? net_prof / strategy.initial_capital * 100 : 0.0
     max_dd     = strategy.max_drawdown
     max_dd_pct = strategy.initial_capital > 0 ? max_dd / strategy.initial_capital * 100 : 0.0
+    max_runup  = strategy.max_runup
     avg_trade  = closed > 0 ? net_prof / closed : 0.0
     avg_win    = wins   > 0 ? gross_prof / wins   : 0.0
     avg_loss   = losses > 0 ? gross_loss / losses : 0.0
     rr_ratio   = avg_loss > 0 ? avg_win / avg_loss : na
     expectancy = (win_rate/100) * avg_win - (1 - win_rate/100) * avg_loss
+
     grade = closed < 10 ? "⚪ POCHI DATI" : prof_fact >= 2.0 and win_rate >= 50 ? "🟢 OTTIMA" : prof_fact >= 1.5 ? "🟡 BUONA" : prof_fact >= 1.0 ? "🟠 OK" : "🔴 PERDENTE"
-    grade_color = closed < 10 ? color.gray : prof_fact >= 1.5 ? color.lime : prof_fact >= 1.0 ? color.yellow : color.red
+    grade_color = closed < 10 ? color.gray : prof_fact >= 2.0 and win_rate >= 50 ? color.lime : prof_fact >= 1.5 ? color.yellow : prof_fact >= 1.0 ? color.orange : color.red
+
     table.cell(stats, 0, 0,  "📊 BACKTEST",  text_color=color.aqua,   text_size=size.small, bgcolor=color.new(color.black,50))
-    table.cell(stats, 1, 0,  "AMD x iFVG",    text_color=color.silver, text_size=size.tiny,  bgcolor=color.new(color.black,50))
-    table.cell(stats, 0, 1,  "Giudizio",     text_color=color.gray, text_size=size.tiny)
-    table.cell(stats, 1, 1,  grade,          text_color=grade_color, text_size=size.tiny)
-    table.cell(stats, 0, 2,  "Net Profit",   text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 1, 0,  mode,           text_color=color.silver, text_size=size.tiny,  bgcolor=color.new(color.black,50))
+    table.cell(stats, 0, 1,  "Giudizio",     text_color=color.gray,   text_size=size.tiny)
+    table.cell(stats, 1, 1,  grade,          text_color=grade_color,  text_size=size.tiny)
+    table.cell(stats, 0, 2,  "Net Profit",   text_color=color.gray,   text_size=size.tiny)
     table.cell(stats, 1, 2,  "$" + str.tostring(math.round(net_prof,2)) + " (" + str.tostring(math.round(net_pct,2)) + "%)", text_color=net_prof >= 0 ? color.lime : color.red, text_size=size.tiny)
-    table.cell(stats, 0, 3,  "Trade Totali", text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 0, 3,  "Trade Totali", text_color=color.gray,   text_size=size.tiny)
     table.cell(stats, 1, 3,  str.tostring(closed) + " (W:" + str.tostring(wins) + " L:" + str.tostring(losses) + ")", text_color=color.white, text_size=size.tiny)
-    table.cell(stats, 0, 4,  "Win Rate",     text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 0, 4,  "Win Rate",     text_color=color.gray,   text_size=size.tiny)
     table.cell(stats, 1, 4,  str.tostring(math.round(win_rate,1)) + "%", text_color=win_rate >= 50 ? color.lime : win_rate >= 40 ? color.yellow : color.red, text_size=size.tiny)
-    table.cell(stats, 0, 5,  "Profit Factor",text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 0, 5,  "Profit Factor",text_color=color.gray,   text_size=size.tiny)
     table.cell(stats, 1, 5,  na(prof_fact) ? "─" : str.tostring(math.round(prof_fact,2)), text_color=na(prof_fact) ? color.gray : prof_fact >= 1.5 ? color.lime : prof_fact >= 1.0 ? color.yellow : color.red, text_size=size.tiny)
-    table.cell(stats, 0, 6,  "Max Drawdown", text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 0, 6,  "Max Drawdown", text_color=color.gray,   text_size=size.tiny)
     table.cell(stats, 1, 6,  "$" + str.tostring(math.round(max_dd,2)) + " (" + str.tostring(math.round(max_dd_pct,2)) + "%)", text_color=max_dd_pct < 10 ? color.lime : max_dd_pct < 20 ? color.yellow : color.red, text_size=size.tiny)
-    table.cell(stats, 0, 7,  "Avg Trade",    text_color=color.gray, text_size=size.tiny)
-    table.cell(stats, 1, 7,  "$" + str.tostring(math.round(avg_trade,2)), text_color=avg_trade >= 0 ? color.lime : color.red, text_size=size.tiny)
-    table.cell(stats, 0, 8,  "Avg Win/Loss", text_color=color.gray, text_size=size.tiny)
-    table.cell(stats, 1, 8,  "$" + str.tostring(math.round(avg_win,1)) + " / $" + str.tostring(math.round(avg_loss,1)), text_color=color.silver, text_size=size.tiny)
-    table.cell(stats, 0, 9,  "R/R Ratio",    text_color=color.gray, text_size=size.tiny)
-    table.cell(stats, 1, 9,  na(rr_ratio) ? "─" : str.tostring(math.round(rr_ratio,2)) + ":1", text_color=na(rr_ratio) ? color.gray : rr_ratio >= 1.5 ? color.lime : color.yellow, text_size=size.tiny)
-    table.cell(stats, 0, 10, "Expectancy",   text_color=color.gray, text_size=size.tiny)
-    table.cell(stats, 1, 10, "$" + str.tostring(math.round(expectancy,2)) + "/trade", text_color=expectancy >= 0 ? color.lime : color.red, text_size=size.tiny)
-    table.cell(stats, 0, 11, "Regola", text_color=color.gray, text_size=size.tiny)
-    table.cell(stats, 1, 11, "100+ trade = affidabile", text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 0, 7,  "Max Runup",    text_color=color.gray,   text_size=size.tiny)
+    table.cell(stats, 1, 7,  "$" + str.tostring(math.round(max_runup,2)), text_color=color.lime, text_size=size.tiny)
+    table.cell(stats, 0, 8,  "Avg Trade",    text_color=color.gray,   text_size=size.tiny)
+    table.cell(stats, 1, 8,  "$" + str.tostring(math.round(avg_trade,2)), text_color=avg_trade >= 0 ? color.lime : color.red, text_size=size.tiny)
+    table.cell(stats, 0, 9,  "Avg Win/Loss", text_color=color.gray,   text_size=size.tiny)
+    table.cell(stats, 1, 9,  "$" + str.tostring(math.round(avg_win,1)) + " / $" + str.tostring(math.round(avg_loss,1)), text_color=color.silver, text_size=size.tiny)
+    table.cell(stats, 0, 10, "R/R Ratio",    text_color=color.gray,   text_size=size.tiny)
+    table.cell(stats, 1, 10, na(rr_ratio) ? "─" : str.tostring(math.round(rr_ratio,2)) + ":1", text_color=na(rr_ratio) ? color.gray : rr_ratio >= 1.5 ? color.lime : rr_ratio >= 1.0 ? color.yellow : color.red, text_size=size.tiny)
+    table.cell(stats, 0, 11, "Expectancy",   text_color=color.gray,   text_size=size.tiny)
+    table.cell(stats, 1, 11, "$" + str.tostring(math.round(expectancy,2)) + "/trade", text_color=expectancy >= 0 ? color.lime : color.red, text_size=size.tiny)
