@@ -20,7 +20,8 @@ ema_fast  = input.int(21, "EMA veloce (grafico)", group="Trend", minval=5, maxva
 ema_slow  = input.int(55, "EMA lenta (grafico)",  group="Trend", minval=10, maxval=200)
 
 // ─── ENTRATA ───────────────────────────────────────────────
-use_mom   = input.bool(true, "Entra anche su candele di spinta (momentum)", group="Entrata", tooltip="Oltre all'incrocio della EMA, entra nel verso del trend anche su candele forti di spinta (spike). Piu entrate sui movimenti dritti.")
+use_mom   = input.bool(false, "Entra anche su candele di spinta (momentum)", group="Entrata", tooltip="⚠️ Insegue il prezzo: entri tardi vicino al picco. Lascialo OFF. Oltre all'incrocio EMA, entra anche su candele forti di spinta (spike).")
+use_pull  = input.bool(true, "Entrata su ritracciamento (pullback) — consigliata", group="Entrata", tooltip="In trend, aspetta che il prezzo torni sulla EMA veloce e poi riparta nel verso del trend. Compri lo sconto invece di inseguire: SL piu stretto e R/R migliore.")
 spike_mult= input.float(0.7, "Spinta minima (ATR)", group="Entrata", minval=0.2, maxval=3.0, step=0.1)
 max_ext   = input.float(1.5, "Distanza max dalla EMA (ATR)", group="Entrata", minval=0.5, maxval=5.0, step=0.25, tooltip="Anti-inseguimento: se il prezzo e gia scappato oltre questa distanza dalla EMA veloce, NON entra (eviti di comprare il massimo / vendere il minimo dello spike).")
 rsi_len   = input.int(14, "RSI periodo", group="Entrata", minval=2, maxval=50)
@@ -36,7 +37,8 @@ risk_pct    = input.float(0.5, "Rischio % per trade", group="Rischio", minval=0.
 sl_swing_len= input.int(5, "Barre swing per SL", group="Rischio", minval=1, maxval=30, tooltip="Lo SL va oltre il minimo/massimo delle ultime N candele + cuscinetto ATR. Si scala da solo al timeframe.")
 sl_buf      = input.float(0.5, "SL buffer ATR", group="Rischio", minval=0.0, maxval=3.0, step=0.1)
 struct_len  = input.int(20, "Barre struttura per TP2", group="Rischio", minval=5, maxval=100)
-tp1_r       = input.float(1.5, "TP1 in multipli di rischio (R)", group="Rischio", minval=0.3, maxval=10.0, step=0.1)
+tp1_r       = input.float(1.0, "TP1 in multipli di rischio (R)", group="Rischio", minval=0.3, maxval=10.0, step=0.1)
+let_run     = input.bool(true, "Lascia correre il runner (no tetto TP2)", group="Rischio", tooltip="Dopo TP1 la parte restante NON ha un tetto fisso: cavalca il trend col trailing stop. È così che le vincite diventano piu grandi delle perdite. OFF = chiude alla struttura (TP2).")
 tp1_pct     = input.float(50,  "% chiusura a TP1", group="Rischio", minval=10, maxval=90)
 use_be      = input.bool(true, "Break-even dopo TP1", group="Rischio")
 use_trail   = input.bool(true, "Trailing stop ATR dopo TP1", group="Rischio")
@@ -87,9 +89,17 @@ rr_sell = risk_sell > 0 ? (close - struct_low)  / risk_sell : 0.0
 rr_ok_buy  = not use_rr or rr_buy  >= min_rr
 rr_ok_sell = not use_rr or rr_sell >= min_rr
 
+// ─── ENTRATA PULLBACK (ritracciamento sulla EMA) ───────────
+pulled_back_up = ta.lowest(low, 3)  <= emaF * 1.0005
+pulled_back_dn = ta.highest(high, 3) >= emaF * 0.9995
+resume_up = close > emaF and close > open
+resume_dn = close < emaF and close < open
+pull_buy  = use_pull and pulled_back_up and resume_up
+pull_sell = use_pull and pulled_back_dn and resume_dn
+
 // ─── SEGNALI ───────────────────────────────────────────────
-core_buy  = htf_bull and chart_bull and (ta.crossover(close, emaF)  or (use_mom and spike_up)) and rsi < rsi_buy_max  and ext_buy  and adx_ok
-core_sell = htf_bear and chart_bear and (ta.crossunder(close, emaF) or (use_mom and spike_dn)) and rsi > rsi_sell_min and ext_sell and adx_ok
+core_buy  = htf_bull and chart_bull and (ta.crossover(close, emaF)  or pull_buy  or (use_mom and spike_up)) and rsi < rsi_buy_max  and ext_buy  and adx_ok
+core_sell = htf_bear and chart_bear and (ta.crossunder(close, emaF) or pull_sell or (use_mom and spike_dn)) and rsi > rsi_sell_min and ext_sell and adx_ok
 
 can_buy  = free_mode ? (strategy.position_size >= 0 and strategy.opentrades < max_open) : strategy.position_size == 0
 can_sell = free_mode ? (strategy.position_size <= 0 and strategy.opentrades < max_open) : strategy.position_size == 0
@@ -122,7 +132,7 @@ if buy_signal
     be_active := false
     last_buy_bar := bar_index
     strategy.entry("LONG", strategy.long, qty=f_qty(risk_buy))
-    strategy.exit("LONG_X", from_entry="LONG", stop=pos_sl, limit=pos_tp2)
+    strategy.exit("LONG_X", from_entry="LONG", stop=pos_sl, limit=(let_run ? na : pos_tp2))
     if show_levels
         box.delete(b_tp), box.delete(b_sl)
         b_tp := box.new(bar_index, pos_entry, bar_index+30, pos_tp2, bgcolor=color.new(color.green,80), border_color=color.new(color.green,40))
@@ -137,7 +147,7 @@ if sell_signal
     be_active := false
     last_sell_bar := bar_index
     strategy.entry("SHORT", strategy.short, qty=f_qty(risk_sell))
-    strategy.exit("SHORT_X", from_entry="SHORT", stop=pos_sl, limit=pos_tp2)
+    strategy.exit("SHORT_X", from_entry="SHORT", stop=pos_sl, limit=(let_run ? na : pos_tp2))
     if show_levels
         box.delete(b_tp), box.delete(b_sl)
         b_tp := box.new(bar_index, pos_tp2,   bar_index+30, pos_entry, bgcolor=color.new(color.green,80), border_color=color.new(color.green,40))
@@ -150,26 +160,26 @@ if strategy.position_size > 0 and not be_active and not na(pos_tp1) and high >= 
     if use_be
         be_active := true
         trail_sl  := pos_entry
-        strategy.exit("LONG_X", from_entry="LONG", stop=trail_sl, limit=pos_tp2)
+        strategy.exit("LONG_X", from_entry="LONG", stop=trail_sl, limit=(let_run ? na : pos_tp2))
 
 if strategy.position_size < 0 and not be_active and not na(pos_tp1) and low <= pos_tp1
     strategy.close("SHORT", qty_percent=tp1_pct, comment="TP1")
     if use_be
         be_active := true
         trail_sl  := pos_entry
-        strategy.exit("SHORT_X", from_entry="SHORT", stop=trail_sl, limit=pos_tp2)
+        strategy.exit("SHORT_X", from_entry="SHORT", stop=trail_sl, limit=(let_run ? na : pos_tp2))
 
 if use_trail and be_active
     if strategy.position_size > 0 and not na(trail_sl)
         new_sl = close - atr * trail_mult
         if new_sl > trail_sl
             trail_sl := new_sl
-            strategy.exit("LONG_X", from_entry="LONG", stop=trail_sl, limit=pos_tp2)
+            strategy.exit("LONG_X", from_entry="LONG", stop=trail_sl, limit=(let_run ? na : pos_tp2))
     if strategy.position_size < 0 and not na(trail_sl)
         new_sl = close + atr * trail_mult
         if new_sl < trail_sl
             trail_sl := new_sl
-            strategy.exit("SHORT_X", from_entry="SHORT", stop=trail_sl, limit=pos_tp2)
+            strategy.exit("SHORT_X", from_entry="SHORT", stop=trail_sl, limit=(let_run ? na : pos_tp2))
 
 if strategy.position_size == 0
     trail_sl  := na
