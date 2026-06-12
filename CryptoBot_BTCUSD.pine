@@ -30,19 +30,19 @@ rsi_sell_min = input.int(28, "RSI min per SELL", group="Entrata", minval=10, max
 
 // ─── ANTI-LATERALE (ADX) ──────────────────────────────────
 use_adx       = input.bool(true, "Filtro ADX (entra solo in trend forte)", group="Anti-laterale", tooltip="ADX misura la forza del trend. Sotto soglia il mercato e laterale (rumore) e il bot non entra. Fondamentale per scalpare BTC.")
-adx_threshold = input.float(25.0, "Soglia ADX minima", group="Anti-laterale", minval=10.0, maxval=50.0, step=1.0)
+adx_threshold = input.float(28.0, "Soglia ADX minima", group="Anti-laterale", minval=10.0, maxval=50.0, step=1.0)
 
 // ─── RISCHIO / USCITE ──────────────────────────────────────
 risk_pct    = input.float(0.5, "Rischio % per trade", group="Rischio", minval=0.1, maxval=5.0, step=0.1)
 sl_swing_len= input.int(5, "Barre swing per SL", group="Rischio", minval=1, maxval=30, tooltip="Lo SL va oltre il minimo/massimo delle ultime N candele + cuscinetto ATR. Si scala da solo al timeframe.")
 sl_buf      = input.float(0.5, "SL buffer ATR", group="Rischio", minval=0.0, maxval=3.0, step=0.1)
 struct_len  = input.int(20, "Barre struttura per TP2", group="Rischio", minval=5, maxval=100)
-tp1_r       = input.float(1.0, "TP1 in multipli di rischio (R)", group="Rischio", minval=0.3, maxval=10.0, step=0.1)
+tp1_r       = input.float(1.5, "TP1 in multipli di rischio (R)", group="Rischio", minval=0.3, maxval=10.0, step=0.1)
 let_run     = input.bool(true, "Lascia correre il runner (no tetto TP2)", group="Rischio", tooltip="Dopo TP1 la parte restante NON ha un tetto fisso: cavalca il trend col trailing stop. È così che le vincite diventano piu grandi delle perdite. OFF = chiude alla struttura (TP2).")
-tp1_pct     = input.float(50,  "% chiusura a TP1", group="Rischio", minval=10, maxval=90)
+tp1_pct     = input.float(30,  "% chiusura a TP1", group="Rischio", minval=10, maxval=90)
 use_be      = input.bool(true, "Break-even dopo TP1", group="Rischio")
 use_trail   = input.bool(true, "Trailing stop ATR dopo TP1", group="Rischio")
-trail_mult  = input.float(2.5, "Trailing ATR mult", group="Rischio", minval=0.5, maxval=8.0, step=0.1)
+trail_mult  = input.float(4.0, "Trailing ATR mult", group="Rischio", minval=0.5, maxval=8.0, step=0.1)
 use_rr      = input.bool(true, "Filtro R:R minimo (TP1/SL)", group="Rischio")
 min_rr      = input.float(1.2, "R:R minimo", group="Rischio", minval=0.3, maxval=10.0, step=0.1)
 
