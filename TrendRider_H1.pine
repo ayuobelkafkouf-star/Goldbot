@@ -1,0 +1,252 @@
+//@version=5
+// ╔══════════════════════════════════════════════════════════════╗
+// ║  TrendRider H1 — Trend-Following su timeframe alto             ║
+// ║  Universale: funziona su ORO (XAUUSD) e BITCOIN (BTCUSD).      ║
+// ║  Filosofia: pochi trade selezionati, UNO alla volta, stop      ║
+// ║  largo, e lascia CORRERE i vincenti (R grande col trailing).   ║
+// ║  Pensato per grafico H1 (bias su H4).                          ║
+// ╚══════════════════════════════════════════════════════════════╝
+strategy("TrendRider H1", shorttitle="TrendRider", overlay=true,
+  default_qty_type=strategy.percent_of_equity, default_qty_value=10,
+  commission_type=strategy.commission.percent, commission_value=0.02,
+  slippage=2, process_orders_on_close=true,
+  max_lines_count=200, max_labels_count=200, max_boxes_count=200)
+
+// ─── TREND ─────────────────────────────────────────────────────
+htf       = input.timeframe("240", "Trend di fondo (bias)", group="Trend", tooltip="Timeframe superiore che fa da bias. Su grafico H1 lascia 240 (H4). Il bot opera SOLO nel verso di questo trend.")
+htf_fast  = input.int(21, "Bias EMA veloce", group="Trend", minval=5, maxval=100)
+htf_slow  = input.int(55, "Bias EMA lenta",  group="Trend", minval=10, maxval=200)
+ema_fast  = input.int(21, "EMA veloce (grafico)", group="Trend", minval=5, maxval=100)
+ema_slow  = input.int(55, "EMA lenta (grafico)",  group="Trend", minval=10, maxval=200)
+
+// ─── ENTRATA ───────────────────────────────────────────────────
+entry_mode  = input.string("Pullback", "Tipo di entrata", options=["Pullback", "Breakout", "Entrambe"], group="Entrata", tooltip="Pullback: in trend, aspetta che il prezzo torni sulla EMA e riparta (compri lo sconto, R:R migliore). Breakout: entra alla rottura del massimo/minimo recente nel verso del trend (prende i movimenti che partono dritti). Entrambe: usa tutti e due.")
+breakout_len= input.int(20, "Barre per breakout (Donchian)", group="Entrata", minval=5, maxval=100, tooltip="Rompe il massimo/minimo delle ultime N barre per entrare in breakout.")
+max_ext     = input.float(2.0, "Distanza max dalla EMA (ATR)", group="Entrata", minval=0.5, maxval=6.0, step=0.25, tooltip="Anti-inseguimento: se il prezzo è già scappato oltre questa distanza dalla EMA, NON entra (eviti di comprare il massimo).")
+rsi_len     = input.int(14, "RSI periodo", group="Entrata", minval=2, maxval=50)
+rsi_buy_max = input.int(75, "RSI max per BUY",  group="Entrata", minval=50, maxval=95)
+rsi_sell_min= input.int(25, "RSI min per SELL", group="Entrata", minval=5, maxval=50)
+
+// ─── ANTI-LATERALE (ADX) ───────────────────────────────────────
+use_adx       = input.bool(true, "Filtro ADX (solo trend forte)", group="Anti-laterale", tooltip="Sotto soglia il mercato è laterale e il bot non entra.")
+adx_threshold = input.float(22.0, "Soglia ADX minima", group="Anti-laterale", minval=10.0, maxval=50.0, step=1.0)
+
+// ─── RISCHIO / USCITE ──────────────────────────────────────────
+risk_pct    = input.float(0.75, "Rischio % per trade", group="Rischio", minval=0.1, maxval=5.0, step=0.05)
+sl_swing_len= input.int(10, "Barre swing per SL", group="Rischio", minval=2, maxval=50, tooltip="Lo SL va oltre il minimo/massimo delle ultime N barre + buffer ATR. Largo = meno stop da rumore.")
+sl_buf      = input.float(0.5, "SL buffer ATR", group="Rischio", minval=0.0, maxval=3.0, step=0.1)
+tp1_r       = input.float(1.5, "TP1 in multipli di rischio (R)", group="Rischio", minval=0.3, maxval=10.0, step=0.1)
+tp1_pct     = input.float(40,  "% chiusura a TP1", group="Rischio", minval=10, maxval=90, tooltip="Banca questa parte a TP1, il resto cavalca il trend col trailing (vincite grandi).")
+use_be      = input.bool(true, "Break-even dopo TP1", group="Rischio")
+trail_mult  = input.float(3.0, "Trailing ATR mult (runner)", group="Rischio", minval=0.5, maxval=10.0, step=0.25, tooltip="Dopo TP1 il resto segue un trailing largo: lascia respirare il trend per catturare i grandi movimenti.")
+use_rr      = input.bool(true, "Filtro R:R minimo", group="Rischio")
+min_rr      = input.float(1.5, "R:R minimo (TP1/SL)", group="Rischio", minval=0.3, maxval=10.0, step=0.1)
+
+// ─── SESSIONE (opzionale) ──────────────────────────────────────
+use_session   = input.bool(false, "Filtro orario (per Oro/forex)", group="Sessione", tooltip="OFF = opera 24h (adatto a BTC). ON = opera solo nella finestra oraria (utile sull'oro per evitare le ore morte). Orari in UTC.")
+sess_start    = input.int(7,  "Ora inizio (UTC)", group="Sessione", minval=0, maxval=23)
+sess_end      = input.int(20, "Ora fine (UTC)",   group="Sessione", minval=0, maxval=23)
+
+show_levels = input.bool(true, "Disegna SL/TP", group="Grafica")
+
+// ─── DATI ──────────────────────────────────────────────────────
+atr = ta.atr(14)
+rsi = ta.rsi(close, rsi_len)
+[_dip, _dim, adx] = ta.dmi(14, 14)
+
+emaF = ta.ema(close, ema_fast)
+emaS = ta.ema(close, ema_slow)
+chart_bull = emaF > emaS
+chart_bear = emaF < emaS
+
+[htfF, htfS] = request.security(syminfo.tickerid, htf, [ta.ema(close, htf_fast)[1], ta.ema(close, htf_slow)[1]], lookahead=barmerge.lookahead_off)
+htf_bull = htfF > htfS
+htf_bear = htfF < htfS
+
+sl_low_anchor  = ta.lowest(low,  sl_swing_len)
+sl_high_anchor = ta.highest(high, sl_swing_len)
+don_high = ta.highest(high, breakout_len)[1]
+don_low  = ta.lowest(low,  breakout_len)[1]
+
+adx_ok = not use_adx or adx >= adx_threshold
+in_session = not use_session or (hour >= sess_start and hour < sess_end)
+
+ext_buy  = (close - emaF) <= atr * max_ext
+ext_sell = (emaF - close) <= atr * max_ext
+
+// ─── SL/TP + R:R ───────────────────────────────────────────────
+sl_buy_calc  = sl_low_anchor  - atr * sl_buf
+sl_sell_calc = sl_high_anchor + atr * sl_buf
+risk_buy  = close - sl_buy_calc
+risk_sell = sl_sell_calc - close
+tp1_buy  = close + tp1_r * risk_buy
+tp1_sell = close - tp1_r * risk_sell
+rr_pass_buy  = not use_rr or tp1_r >= min_rr
+rr_pass_sell = not use_rr or tp1_r >= min_rr
+
+// ─── ENTRATE: PULLBACK / BREAKOUT ──────────────────────────────
+use_pull  = entry_mode == "Pullback" or entry_mode == "Entrambe"
+use_break = entry_mode == "Breakout" or entry_mode == "Entrambe"
+
+pulled_back_up = ta.lowest(low, 4)  <= emaF * 1.0010
+pulled_back_dn = ta.highest(high, 4) >= emaF * 0.9990
+resume_up = close > emaF and close > open
+resume_dn = close < emaF and close < open
+pull_buy  = use_pull and pulled_back_up and resume_up
+pull_sell = use_pull and pulled_back_dn and resume_dn
+
+brk_buy  = use_break and ta.crossover(close, don_high)
+brk_sell = use_break and ta.crossunder(close, don_low)
+
+// ─── SEGNALI ───────────────────────────────────────────────────
+core_buy  = htf_bull and chart_bull and (pull_buy  or brk_buy)  and rsi < rsi_buy_max  and ext_buy  and adx_ok and in_session
+core_sell = htf_bear and chart_bear and (pull_sell or brk_sell) and rsi > rsi_sell_min and ext_sell and adx_ok and in_session
+
+flat = strategy.position_size == 0
+buy_signal  = core_buy  and flat and risk_buy  > 0 and rr_pass_buy
+sell_signal = core_sell and flat and risk_sell > 0 and rr_pass_sell
+
+// ─── SIZING ────────────────────────────────────────────────────
+f_qty(_sl_dist) =>
+    risk_cash = strategy.equity * (risk_pct / 100.0)
+    _sl_dist > 0 ? risk_cash / _sl_dist : 0.0
+
+// ─── STATO ─────────────────────────────────────────────────────
+var float pos_sl    = na
+var float pos_tp1   = na
+var float pos_entry = na
+var bool  be_active = false
+var float trail_sl  = na
+var int   last_buy_bar  = 0
+var int   last_sell_bar = 0
+var box b_tp = na
+var box b_sl = na
+
+// ─── ENTRATE ───────────────────────────────────────────────────
+if buy_signal
+    pos_entry := close
+    pos_sl    := sl_buy_calc
+    pos_tp1   := tp1_buy
+    be_active := false
+    last_buy_bar := bar_index
+    strategy.entry("LONG", strategy.long, qty=f_qty(risk_buy))
+    strategy.exit("LONG_X", from_entry="LONG", stop=pos_sl)
+    if show_levels
+        box.delete(b_tp), box.delete(b_sl)
+        b_tp := box.new(bar_index, pos_entry, bar_index+40, pos_tp1, bgcolor=color.new(color.green,80), border_color=color.new(color.green,40))
+        b_sl := box.new(bar_index, pos_sl,    bar_index+40, pos_entry, bgcolor=color.new(color.red,80),  border_color=color.new(color.red,40))
+    alert("🟢 TrendRider BUY\nEntry: " + str.tostring(pos_entry,"#.##") + "\nSL: " + str.tostring(pos_sl,"#.##") + "\nTP1: " + str.tostring(pos_tp1,"#.##"), alert.freq_once_per_bar_close)
+
+if sell_signal
+    pos_entry := close
+    pos_sl    := sl_sell_calc
+    pos_tp1   := tp1_sell
+    be_active := false
+    last_sell_bar := bar_index
+    strategy.entry("SHORT", strategy.short, qty=f_qty(risk_sell))
+    strategy.exit("SHORT_X", from_entry="SHORT", stop=pos_sl)
+    if show_levels
+        box.delete(b_tp), box.delete(b_sl)
+        b_tp := box.new(bar_index, pos_tp1,   bar_index+40, pos_entry, bgcolor=color.new(color.green,80), border_color=color.new(color.green,40))
+        b_sl := box.new(bar_index, pos_entry, bar_index+40, pos_sl, bgcolor=color.new(color.red,80),  border_color=color.new(color.red,40))
+    alert("🔴 TrendRider SELL\nEntry: " + str.tostring(pos_entry,"#.##") + "\nSL: " + str.tostring(pos_sl,"#.##") + "\nTP1: " + str.tostring(pos_tp1,"#.##"), alert.freq_once_per_bar_close)
+
+// ─── TP1 PARZIALE + BREAK-EVEN + TRAILING (lascia correre) ─────
+if strategy.position_size > 0 and not be_active and not na(pos_tp1) and high >= pos_tp1
+    strategy.close("LONG", qty_percent=tp1_pct, comment="TP1")
+    be_active := true
+    trail_sl  := use_be ? pos_entry : pos_sl
+    strategy.exit("LONG_X", from_entry="LONG", stop=trail_sl)
+
+if strategy.position_size < 0 and not be_active and not na(pos_tp1) and low <= pos_tp1
+    strategy.close("SHORT", qty_percent=tp1_pct, comment="TP1")
+    be_active := true
+    trail_sl  := use_be ? pos_entry : pos_sl
+    strategy.exit("SHORT_X", from_entry="SHORT", stop=trail_sl)
+
+if be_active
+    if strategy.position_size > 0 and not na(trail_sl)
+        new_sl = close - atr * trail_mult
+        if new_sl > trail_sl
+            trail_sl := new_sl
+            strategy.exit("LONG_X", from_entry="LONG", stop=trail_sl)
+    if strategy.position_size < 0 and not na(trail_sl)
+        new_sl = close + atr * trail_mult
+        if new_sl < trail_sl
+            trail_sl := new_sl
+            strategy.exit("SHORT_X", from_entry="SHORT", stop=trail_sl)
+
+if strategy.position_size == 0
+    trail_sl  := na
+    be_active := false
+
+// ─── GRAFICA ───────────────────────────────────────────────────
+plot(emaF, "EMA veloce", color=color.new(color.aqua, 30))
+plot(emaS, "EMA lenta",  color=color.new(color.orange, 40))
+plotshape(bar_index == last_buy_bar,  title="BUY",  style=shape.labelup,   location=location.belowbar, color=color.lime, textcolor=color.black, size=size.small, text="BUY")
+plotshape(bar_index == last_sell_bar, title="SELL", style=shape.labeldown, location=location.abovebar, color=color.red,  textcolor=color.white, size=size.small, text="SELL")
+
+// ─── PANNELLO STATO ────────────────────────────────────────────
+var table p = table.new(position.middle_left, 2, 6, bgcolor=color.new(color.black,70), border_width=1, border_color=color.new(color.orange,60))
+if barstate.islast
+    table.cell(p, 0, 0, "TrendRider H1", text_color=color.orange, text_size=size.small, bgcolor=color.new(color.black,50))
+    table.cell(p, 1, 0, syminfo.ticker, text_color=color.silver, text_size=size.tiny, bgcolor=color.new(color.black,50))
+    table.cell(p, 0, 1, "Bias H4", text_color=color.gray, text_size=size.tiny)
+    table.cell(p, 1, 1, htf_bull ? "RIALZO ▲" : htf_bear ? "RIBASSO ▼" : "neutro", text_color=htf_bull ? color.lime : color.red, text_size=size.tiny)
+    table.cell(p, 0, 2, "Trend grafico", text_color=color.gray, text_size=size.tiny)
+    table.cell(p, 1, 2, chart_bull ? "RIALZO ▲" : "RIBASSO ▼", text_color=chart_bull ? color.lime : color.red, text_size=size.tiny)
+    table.cell(p, 0, 3, "ADX / RSI", text_color=color.gray, text_size=size.tiny)
+    table.cell(p, 1, 3, str.tostring(math.round(adx,1)) + " / " + str.tostring(math.round(rsi,1)), text_color=adx_ok ? color.lime : color.orange, text_size=size.tiny)
+    table.cell(p, 0, 4, "Posizione", text_color=color.gray, text_size=size.tiny)
+    pos_tag = be_active ? " TRAIL" : ""
+    table.cell(p, 1, 4, strategy.position_size > 0 ? "LONG 🟢" + pos_tag : strategy.position_size < 0 ? "SHORT 🔴" + pos_tag : "FLAT ⚪", text_color=strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.white, text_size=size.tiny)
+    table.cell(p, 0, 5, "SL / TP1", text_color=color.gray, text_size=size.tiny)
+    sl_d  = strategy.position_size != 0 and not na(trail_sl) ? str.tostring(math.round(trail_sl,2)) : strategy.position_size != 0 ? str.tostring(math.round(pos_sl,2)) : "─"
+    tp1_d = strategy.position_size != 0 ? str.tostring(math.round(pos_tp1,2)) : "─"
+    table.cell(p, 1, 5, sl_d + " / " + tp1_d, text_color=color.silver, text_size=size.tiny)
+
+// ─── TABELLA STATISTICHE BACKTEST ──────────────────────────────
+var table stats = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black,70), border_width=1, border_color=color.new(color.orange,60))
+if barstate.islast
+    closed     = strategy.closedtrades
+    wins       = strategy.wintrades
+    losses     = strategy.losstrades
+    win_rate   = closed > 0 ? wins / closed * 100 : 0.0
+    gross_prof = strategy.grossprofit
+    gross_loss = strategy.grossloss
+    prof_fact  = gross_loss > 0 ? gross_prof / gross_loss : na
+    net_prof   = strategy.netprofit
+    net_pct    = strategy.initial_capital > 0 ? net_prof / strategy.initial_capital * 100 : 0.0
+    max_dd     = strategy.max_drawdown
+    max_dd_pct = strategy.initial_capital > 0 ? max_dd / strategy.initial_capital * 100 : 0.0
+    avg_trade  = closed > 0 ? net_prof / closed : 0.0
+    avg_win    = wins   > 0 ? gross_prof / wins   : 0.0
+    avg_loss   = losses > 0 ? gross_loss / losses : 0.0
+    rr_ratio   = avg_loss > 0 ? avg_win / avg_loss : na
+    expectancy = (win_rate/100) * avg_win - (1 - win_rate/100) * avg_loss
+    grade = closed < 10 ? "⚪ POCHI DATI" : prof_fact >= 2.0 and win_rate >= 45 ? "🟢 OTTIMA" : prof_fact >= 1.5 ? "🟡 BUONA" : prof_fact >= 1.0 ? "🟠 OK" : "🔴 PERDENTE"
+    grade_color = closed < 10 ? color.gray : prof_fact >= 1.5 ? color.lime : prof_fact >= 1.0 ? color.yellow : color.red
+    table.cell(stats, 0, 0,  "📊 BACKTEST",  text_color=color.orange, text_size=size.small, bgcolor=color.new(color.black,50))
+    table.cell(stats, 1, 0,  syminfo.ticker,  text_color=color.silver, text_size=size.tiny,  bgcolor=color.new(color.black,50))
+    table.cell(stats, 0, 1,  "Giudizio",     text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 1, 1,  grade,          text_color=grade_color, text_size=size.tiny)
+    table.cell(stats, 0, 2,  "Net Profit",   text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 1, 2,  "$" + str.tostring(math.round(net_prof,2)) + " (" + str.tostring(math.round(net_pct,2)) + "%)", text_color=net_prof >= 0 ? color.lime : color.red, text_size=size.tiny)
+    table.cell(stats, 0, 3,  "Trade Totali", text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 1, 3,  str.tostring(closed) + " (W:" + str.tostring(wins) + " L:" + str.tostring(losses) + ")", text_color=color.white, text_size=size.tiny)
+    table.cell(stats, 0, 4,  "Win Rate",     text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 1, 4,  str.tostring(math.round(win_rate,1)) + "%", text_color=win_rate >= 45 ? color.lime : win_rate >= 35 ? color.yellow : color.red, text_size=size.tiny)
+    table.cell(stats, 0, 5,  "Profit Factor",text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 1, 5,  na(prof_fact) ? "─" : str.tostring(math.round(prof_fact,2)), text_color=na(prof_fact) ? color.gray : prof_fact >= 1.5 ? color.lime : prof_fact >= 1.0 ? color.yellow : color.red, text_size=size.tiny)
+    table.cell(stats, 0, 6,  "Max Drawdown", text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 1, 6,  "$" + str.tostring(math.round(max_dd,2)) + " (" + str.tostring(math.round(max_dd_pct,2)) + "%)", text_color=max_dd_pct < 15 ? color.lime : max_dd_pct < 30 ? color.yellow : color.red, text_size=size.tiny)
+    table.cell(stats, 0, 7,  "Avg Trade",    text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 1, 7,  "$" + str.tostring(math.round(avg_trade,2)), text_color=avg_trade >= 0 ? color.lime : color.red, text_size=size.tiny)
+    table.cell(stats, 0, 8,  "Avg Win/Loss", text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 1, 8,  "$" + str.tostring(math.round(avg_win,1)) + " / $" + str.tostring(math.round(avg_loss,1)), text_color=color.silver, text_size=size.tiny)
+    table.cell(stats, 0, 9,  "R/R Ratio",    text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 1, 9,  na(rr_ratio) ? "─" : str.tostring(math.round(rr_ratio,2)) + ":1", text_color=na(rr_ratio) ? color.gray : rr_ratio >= 1.5 ? color.lime : color.yellow, text_size=size.tiny)
+    table.cell(stats, 0, 10, "Expectancy",   text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 1, 10, "$" + str.tostring(math.round(expectancy,2)) + "/trade", text_color=expectancy >= 0 ? color.lime : color.red, text_size=size.tiny)
+    table.cell(stats, 0, 11, "Regola", text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 1, 11, "50+ trade = affidabile", text_color=color.gray, text_size=size.tiny)
