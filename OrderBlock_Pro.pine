@@ -26,13 +26,13 @@ htf      = input.timeframe("240", "Timeframe del bias", group="Filtri")
 htf_fast = input.int(21, "Bias EMA veloce", group="Filtri", minval=5, maxval=100)
 htf_slow = input.int(55, "Bias EMA lenta",  group="Filtri", minval=10, maxval=200)
 use_adx       = input.bool(true, "Filtro ADX (no laterale)", group="Filtri")
-adx_threshold = input.float(20.0, "Soglia ADX minima", group="Filtri", minval=10.0, maxval=50.0, step=1.0)
+adx_threshold = input.float(23.0, "Soglia ADX minima", group="Filtri", minval=10.0, maxval=50.0, step=1.0)
 
 // ─── RISCHIO / USCITE ──────────────────────────────────────────
 risk_pct   = input.float(0.75, "Rischio % per trade", group="Rischio", minval=0.1, maxval=5.0, step=0.05)
 sl_buf     = input.float(0.3, "SL buffer ATR (oltre l'OB)", group="Rischio", minval=0.0, maxval=3.0, step=0.1)
-tp1_r      = input.float(1.5, "TP1 in multipli di rischio (R)", group="Rischio", minval=0.3, maxval=10.0, step=0.1)
-tp1_pct    = input.float(50,  "% chiusura a TP1", group="Rischio", minval=10, maxval=90, tooltip="Banca questa parte a TP1, il resto cavalca col trailing.")
+tp1_r      = input.float(1.8, "TP1 in multipli di rischio (R)", group="Rischio", minval=0.3, maxval=10.0, step=0.1)
+tp1_pct    = input.float(70,  "% chiusura a TP1", group="Rischio", minval=10, maxval=90, tooltip="Banca questa parte a TP1, il resto cavalca col trailing.")
 use_be     = input.bool(true, "Break-even dopo TP1", group="Rischio")
 trail_mult = input.float(2.5, "Trailing ATR mult (runner)", group="Rischio", minval=0.5, maxval=10.0, step=0.25)
 
