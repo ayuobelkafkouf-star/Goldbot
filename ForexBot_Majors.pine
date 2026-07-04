@@ -465,8 +465,9 @@ v_score := bt_net > 0 ? v_score + 1 : v_score - 2
 v_score := bt_dd_pct < 10 ? v_score + 1 : bt_dd_pct < 20 ? v_score : v_score - 1
 v_score := bt_rr >= 1.5 ? v_score + 1 : bt_rr >= 1.0 ? v_score : v_score
 
-verdict = v_score >= 5 ? "ECCELLENTE 🟢" : v_score >= 3 ? "BUONA 🟢" : v_score >= 1 ? "MEDIOCRE 🟡" : "SCARSA 🔴"
-verdict_col = v_score >= 5 ? color.lime : v_score >= 3 ? color.green : v_score >= 1 ? color.yellow : color.red
+// Con pochi/zero trade il punteggio non è significativo: non emettere un verdetto.
+verdict = bt_trades == 0 ? "NESSUN TRADE ⚪" : bt_trades < 10 ? "DATI INSUFF. 🟡" : v_score >= 5 ? "ECCELLENTE 🟢" : v_score >= 3 ? "BUONA 🟢" : v_score >= 1 ? "MEDIOCRE 🟡" : "SCARSA 🔴"
+verdict_col = bt_trades == 0 ? color.gray : bt_trades < 10 ? color.orange : v_score >= 5 ? color.lime : v_score >= 3 ? color.green : v_score >= 1 ? color.yellow : color.red
 
 // Affidabilità del campione (troppi pochi trade = risultato non significativo)
 reliab = bt_trades >= 100 ? "ALTA ✅" : bt_trades >= 30 ? "MEDIA 🟡" : "BASSA 🔴 (pochi trade)"
@@ -496,6 +497,6 @@ if barstate.islast and show_verdict
     table.cell(vt, 0, 8, "Affidabilità", text_color=color.gray, text_size=size.tiny)
     table.cell(vt, 1, 8, reliab, text_color=reliab_col, text_size=size.tiny)
     table.cell(vt, 0, 9, "Punteggio", text_color=color.gray, text_size=size.tiny)
-    table.cell(vt, 1, 9, str.tostring(v_score) + " / 6", text_color=verdict_col, text_size=size.tiny)
+    table.cell(vt, 1, 9, bt_trades < 10 ? "N/D (servono ≥10 trade)" : str.tostring(v_score) + " / 6", text_color=verdict_col, text_size=size.tiny)
     table.cell(vt, 0, 10, "Capitale iniziale", text_color=color.gray, text_size=size.tiny)
     table.cell(vt, 1, 10, str.tostring(math.round(strategy.initial_capital,0)), text_color=color.silver, text_size=size.tiny)
