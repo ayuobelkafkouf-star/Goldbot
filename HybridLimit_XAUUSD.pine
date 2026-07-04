@@ -339,6 +339,5 @@ if i_showTable and barstate.islast
 // ================================================================
 // ALERTS
 // ================================================================
-if i_useAlerts
-    alertcondition(strategy.position_size != 0 and strategy.position_size[1] == 0, title="Entry Filled", message="HLv5 XAUUSD - Entry filled")
-    alertcondition(strategy.position_size == 0 and strategy.position_size[1] != 0, title="Position Closed", message="HLv5 XAUUSD - Position closed")
+alertcondition(i_useAlerts and strategy.position_size != 0 and strategy.position_size[1] == 0, title="Entry Filled", message="HLv5 XAUUSD - Entry filled")
+alertcondition(i_useAlerts and strategy.position_size == 0 and strategy.position_size[1] != 0, title="Position Closed", message="HLv5 XAUUSD - Position closed")
