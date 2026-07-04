@@ -437,3 +437,65 @@ if barstate.islast
     table.cell(t, 1, 20, filter_status(h1_bull), text_color=h1_bull ? color.lime : color.red, text_size=size.tiny)
     table.cell(t, 0, 21, "Zona Demand",   text_color=color.gray, text_size=size.tiny)
     table.cell(t, 1, 21, filter_status(price_at_demand), text_color=price_at_demand ? color.lime : color.red, text_size=size.tiny)
+
+// ─── TABELLA GIUDIZIO BACKTEST ────────────────────────────
+// Valuta i risultati del Tester di strategia e dà un verdetto sintetico.
+show_verdict = input.bool(true, "Mostra tabella Giudizio Backtest", group="Giudizio Backtest")
+
+// Metriche dal motore di backtest
+bt_net       = strategy.netprofit
+bt_net_pct   = strategy.initial_capital > 0 ? strategy.netprofit / strategy.initial_capital * 100 : 0.0
+bt_gp        = strategy.grossprofit
+bt_gl        = strategy.grossloss
+bt_pf        = bt_gl > 0 ? bt_gp / bt_gl : (bt_gp > 0 ? 999.0 : 0.0)
+bt_trades    = strategy.closedtrades
+bt_wins      = strategy.wintrades
+bt_losses    = strategy.losstrades
+bt_winrate   = bt_trades > 0 ? bt_wins / bt_trades * 100 : 0.0
+bt_dd_pct    = strategy.initial_capital > 0 ? strategy.max_drawdown / strategy.initial_capital * 100 : 0.0
+bt_avg_win   = bt_wins   > 0 ? bt_gp / bt_wins   : 0.0
+bt_avg_loss  = bt_losses > 0 ? bt_gl / bt_losses : 0.0
+bt_rr        = bt_avg_loss > 0 ? bt_avg_win / bt_avg_loss : 0.0
+
+// Punteggio del verdetto
+v_score = 0
+v_score := bt_pf >= 1.6 ? v_score + 2 : bt_pf >= 1.3 ? v_score + 1 : bt_pf >= 1.0 ? v_score : v_score - 2
+v_score := bt_winrate >= 55 ? v_score + 1 : bt_winrate >= 45 ? v_score : v_score - 1
+v_score := bt_net > 0 ? v_score + 1 : v_score - 2
+v_score := bt_dd_pct < 10 ? v_score + 1 : bt_dd_pct < 20 ? v_score : v_score - 1
+v_score := bt_rr >= 1.5 ? v_score + 1 : bt_rr >= 1.0 ? v_score : v_score
+
+verdict = v_score >= 5 ? "ECCELLENTE 🟢" : v_score >= 3 ? "BUONA 🟢" : v_score >= 1 ? "MEDIOCRE 🟡" : "SCARSA 🔴"
+verdict_col = v_score >= 5 ? color.lime : v_score >= 3 ? color.green : v_score >= 1 ? color.yellow : color.red
+
+// Affidabilità del campione (troppi pochi trade = risultato non significativo)
+reliab = bt_trades >= 100 ? "ALTA ✅" : bt_trades >= 30 ? "MEDIA 🟡" : "BASSA 🔴 (pochi trade)"
+reliab_col = bt_trades >= 100 ? color.lime : bt_trades >= 30 ? color.yellow : color.red
+
+f_metric_col(_v, _good, _mid) => _v >= _good ? color.lime : _v >= _mid ? color.yellow : color.red
+
+var table vt = table.new(position.top_right, 2, 11, bgcolor=color.new(color.black,75), border_width=1, border_color=color.new(color.aqua,50))
+
+if barstate.islast and show_verdict
+    table.cell(vt, 0, 0, "📊 GIUDIZIO BACKTEST", text_color=color.aqua, text_size=size.small, bgcolor=color.new(color.black,40))
+    table.cell(vt, 1, 0, verdict, text_color=verdict_col, text_size=size.small, bgcolor=color.new(color.black,40))
+    table.cell(vt, 0, 1, "Net Profit", text_color=color.gray, text_size=size.tiny)
+    table.cell(vt, 1, 1, str.tostring(math.round(bt_net,2)) + " (" + str.tostring(math.round(bt_net_pct,1)) + "%)", text_color=bt_net >= 0 ? color.lime : color.red, text_size=size.tiny)
+    table.cell(vt, 0, 2, "Profit Factor", text_color=color.gray, text_size=size.tiny)
+    table.cell(vt, 1, 2, str.tostring(math.round(bt_pf,2)), text_color=f_metric_col(bt_pf,1.6,1.3), text_size=size.tiny)
+    table.cell(vt, 0, 3, "Win Rate", text_color=color.gray, text_size=size.tiny)
+    table.cell(vt, 1, 3, str.tostring(math.round(bt_winrate,1)) + "%", text_color=f_metric_col(bt_winrate,55,45), text_size=size.tiny)
+    table.cell(vt, 0, 4, "Avg R:R", text_color=color.gray, text_size=size.tiny)
+    table.cell(vt, 1, 4, str.tostring(math.round(bt_rr,2)) + " : 1", text_color=f_metric_col(bt_rr,1.5,1.0), text_size=size.tiny)
+    table.cell(vt, 0, 5, "Max Drawdown", text_color=color.gray, text_size=size.tiny)
+    table.cell(vt, 1, 5, str.tostring(math.round(bt_dd_pct,1)) + "%", text_color=bt_dd_pct < 10 ? color.lime : bt_dd_pct < 20 ? color.yellow : color.red, text_size=size.tiny)
+    table.cell(vt, 0, 6, "Trade totali", text_color=color.gray, text_size=size.tiny)
+    table.cell(vt, 1, 6, str.tostring(bt_trades), text_color=color.white, text_size=size.tiny)
+    table.cell(vt, 0, 7, "Vinti / Persi", text_color=color.gray, text_size=size.tiny)
+    table.cell(vt, 1, 7, str.tostring(bt_wins) + " / " + str.tostring(bt_losses), text_color=color.silver, text_size=size.tiny)
+    table.cell(vt, 0, 8, "Affidabilità", text_color=color.gray, text_size=size.tiny)
+    table.cell(vt, 1, 8, reliab, text_color=reliab_col, text_size=size.tiny)
+    table.cell(vt, 0, 9, "Punteggio", text_color=color.gray, text_size=size.tiny)
+    table.cell(vt, 1, 9, str.tostring(v_score) + " / 6", text_color=verdict_col, text_size=size.tiny)
+    table.cell(vt, 0, 10, "Capitale iniziale", text_color=color.gray, text_size=size.tiny)
+    table.cell(vt, 1, 10, str.tostring(math.round(strategy.initial_capital,0)), text_color=color.silver, text_size=size.tiny)
