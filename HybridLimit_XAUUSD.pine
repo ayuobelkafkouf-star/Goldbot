@@ -298,12 +298,12 @@ if barstate.isconfirmed and not na(atrVal) and atrVal > 0
                     stSLPrice := slP
                     stTPPrice := tpP
 
-                    // ENTER (limit entry; SL/TP handled by strategy.exit)
+                    // ENTER (limit entry con stop di protezione; SL/TP gestiti anche da strategy.exit)
                     if stDir == 1
-                        strategy.entry("Long", strategy.long, limit=stLimitPrice)
+                        strategy.entry("Long", strategy.long, limit=stLimitPrice, stop=stSLPrice)
                         strategy.exit("LongExit", "Long", limit=stTPPrice, stop=stSLPrice)
                     else
-                        strategy.entry("Short", strategy.short, limit=stLimitPrice)
+                        strategy.entry("Short", strategy.short, limit=stLimitPrice, stop=stSLPrice)
                         strategy.exit("ShortExit", "Short", limit=stTPPrice, stop=stSLPrice)
 
                     // Update label
