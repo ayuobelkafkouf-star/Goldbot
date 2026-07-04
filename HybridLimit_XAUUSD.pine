@@ -13,27 +13,29 @@ strategy("HYBRID LIMIT v5 XAUUSD", overlay=true, default_qty_type=strategy.perce
 //   - Timeframe: 15 minuti
 //   - Risk: 0.5% per trade
 //
-// NOTA 1: la direttiva //@version=5 DEVE essere la prima riga dello script.
-// NOTA 2: in Pine Script il carattere '$' NON e' valido negli identificatori.
-//         Le variabili "in dollari" usano quindi il suffisso "D" (es. minBodyD).
+// NOTA Pine v5:
+//   - //@version=5 DEVE essere la riga 1 assoluta (niente sopra, nemmeno spazi).
+//   - '$' non e' valido nei nomi: le variabili in dollari usano il suffisso "D".
+//   - Una funzione NON puo' modificare variabili globali: il reset e' gestito
+//     con il flag doReset a livello principale.
 
 // ================================================================
 // INPUTS
 // ================================================================
 // --- Session ---
-string GRP1 = "⏰ Session (UTC)"
+string GRP1 = "Session (UTC)"
 i_sessStart  = input.int(7,  "Impulse Window Start",    minval=0, maxval=23, group=GRP1)
 i_sessEnd    = input.int(12, "Impulse Window End",      minval=0, maxval=23, group=GRP1)
 i_fillCutoff = input.int(16, "Fill Cutoff (no fills after)", minval=0, maxval=23, group=GRP1)
 i_forceClose = input.int(17, "Force Close All",         minval=0, maxval=23, group=GRP1)
 
 // --- Adaptive Scaling ---
-string GRP2 = "📐 Adaptive Scaling (auto per ATR)"
+string GRP2 = "Adaptive Scaling (auto per ATR)"
 i_fxRefATR   = input.float(8.06, "Forex Ref ATR (pips)",    group=GRP2, tooltip="GBPUSD+EURUSD avg London ATR in pips")
 i_atrPeriod  = input.int(20,     "ATR Period",               group=GRP2)
 
 // --- Impulse ---
-string GRP3 = "⚡ Impulse Detection (forex pips, scaled auto)"
+string GRP3 = "Impulse Detection (forex pips, scaled auto)"
 i_atrMult    = input.float(1.25, "ATR Multiplier",           step=0.05, group=GRP3, tooltip="Body >= mult * ATR. 1.25 = v5 ottimizzato per gold")
 i_fxMinBody  = input.float(9,    "Min Body",                 group=GRP3)
 i_fxOBMin    = input.float(5,    "OB Min Width",             group=GRP3)
@@ -41,7 +43,7 @@ i_fxOBMax    = input.float(32,   "OB Max Width",             group=GRP3)
 i_obExpiry   = input.int(40,     "OB Expiry (bars)",         minval=10, maxval=100, group=GRP3)
 
 // --- Entry / SL / TP ---
-string GRP4 = "🎯 Entry & Risk (forex pips, scaled auto)"
+string GRP4 = "Entry & Risk (forex pips, scaled auto)"
 i_fxPullMin  = input.float(13,  "Pullback Min",             group=GRP4)
 i_limitRatio = input.float(0.30, "Limit Offset %",          step=0.05, group=GRP4, tooltip="Limit at 30% into OB from edge")
 i_fxLimitMin = input.float(2,    "Limit Min Offset",         group=GRP4)
@@ -53,7 +55,7 @@ i_fxOBInv    = input.float(5,    "Invalidate Distance",      group=GRP4)
 i_rrRatio    = input.float(1.0,  "TP/SL Ratio",             step=0.5, group=GRP4, tooltip="1.0=1:1 (consistente), 2.0=1:2 (max PnL)")
 
 // --- Display ---
-string GRP5 = "🎨 Display"
+string GRP5 = "Display"
 i_showTable  = input.bool(true,  "Info Panel",               group=GRP5)
 i_showOB     = input.bool(true,  "Draw Order Blocks",        group=GRP5)
 i_showFill   = input.bool(true,  "Fill Markers",             group=GRP5)
@@ -62,14 +64,9 @@ i_useAlerts  = input.bool(false, "Enable Alerts",            group=GRP5)
 // ================================================================
 // ADAPTIVE SCALING
 // ================================================================
-// ATR on TV for XAUUSD is in dollars.
-// scale = ATR_gold / ATR_forex_ref
-// 1 pip-oro in $ = scale * 0.01
-// All forex-pip thresholds → $ = fx_pip * scale * 0.01
-
 atrVal       = ta.atr(i_atrPeriod)
 scale        = atrVal / i_fxRefATR
-pipGold      = scale * 0.01            // 1 forex pip = this many $
+pipGold      = scale * 0.01
 minBodyD     = i_fxMinBody  * pipGold
 obMinD       = i_fxOBMin    * pipGold
 obMaxD       = i_fxOBMax    * pipGold
@@ -90,9 +87,8 @@ noFill       = utcH >= i_fillCutoff
 doForceClose = utcH >= i_forceClose
 
 // ================================================================
-// STATE MACHINE
+// STATE MACHINE STATE
 // ================================================================
-// States: IDLE → IMPULSE_DETECTED → WAIT_PULLBACK → LIMIT_PENDING → IN_TRADE
 int IDLE            = 0
 int WAIT_PULLBACK   = 1
 int LIMIT_ACTIVE    = 2
@@ -100,7 +96,7 @@ int LIMIT_ACTIVE    = 2
 var int    stState        = IDLE
 var float  stOBHigh       = na
 var float  stOBLow        = na
-var int    stDir          = 0           // 1=BUY, -1=SELL
+var int    stDir          = 0
 var int    stAge          = 0
 var float  stMaxFav       = 0.0
 var float  stLimitPrice   = na
@@ -113,29 +109,8 @@ var box    stBox          = na
 var label  stLabel        = na
 
 // ================================================================
-// UTILITY: Cancel everything and reset
-// ================================================================
-f_reset() =>
-    strategy.cancel_all()
-    stState      := IDLE
-    stOBHigh     := na
-    stOBLow      := na
-    stDir        := 0
-    stAge        := 0
-    stMaxFav     := 0.0
-    stLimitPrice := na
-    stSLPrice    := na
-    stTPPrice    := na
-    stSLDist     := 0.0
-    if not na(stBox)
-        box.delete(stBox)
-        stBox := na
-    if not na(stLabel)
-        label.delete(stLabel)
-        stLabel := na
-
-// ================================================================
 // UTILITY: Compute SL/TP from limit price
+// (le funzioni possono modificare solo variabili LOCALI)
 // ================================================================
 f_calcSLTP(float limP, float zH, float zL, int dir) =>
     float slDist = 0.0
@@ -164,6 +139,7 @@ if barstate.isconfirmed and not na(atrVal) and atrVal > 0
     body   = math.abs(close - open)
     isBull = close > open
     obW    = high - low
+    bool doReset = false
 
     // ---- FORCE CLOSE ----
     if doForceClose and strategy.position_size != 0
@@ -171,10 +147,7 @@ if barstate.isconfirmed and not na(atrVal) and atrVal > 0
 
     // ---- IN TRADE: let strategy.exit handle SL/TP ----
     if strategy.position_size != 0
-        // OB expired or no fill zone — just let exit orders work
         stState := LIMIT_ACTIVE  // stay here until flat
-        if strategy.position_size == 0
-            f_reset()
 
     // ---- STATE MACHINE (only when flat) ----
     if strategy.position_size == 0
@@ -202,16 +175,11 @@ if barstate.isconfirmed and not na(atrVal) and atrVal > 0
 
                         if i_showOB
                             clr = dir == 1 ? color.new(#00d4aa, 65) : color.new(#ff4757, 65)
-                            stBox := box.new(bar_index, high, bar_index + 5, low,
-                                 border_color=dir == 1 ? #00d4aa : #ff4757,
-                                 bgcolor=clr, border_width=1)
+                            stBox := box.new(bar_index, high, bar_index + 5, low, border_color=dir == 1 ? #00d4aa : #ff4757, bgcolor=clr, border_width=1)
 
                         if i_showFill
                             gpBody = body * 100
-                            stLabel := label.new(bar_index, dir == 1 ? low : high,
-                                 "IMPULSE " + (dir == 1 ? "↑" : "↓") + "\n" + str.tostring(math.round(gpBody)) + "gp\nATR " + str.tostring(bodyATR, "#.##") + "x",
-                                 style=dir == 1 ? label.style_label_up : label.style_label_down,
-                                 color=color.gray, textcolor=color.white, size=size.tiny)
+                            stLabel := label.new(bar_index, dir == 1 ? low : high, "IMPULSE " + (dir == 1 ? "UP" : "DN") + "\n" + str.tostring(math.round(gpBody)) + "gp\nATR " + str.tostring(bodyATR, "#.##") + "x", style=dir == 1 ? label.style_label_up : label.style_label_down, color=color.gray, textcolor=color.white, size=size.tiny)
 
         // === WAIT_PULLBACK: track favorable excursion ===
         else if stState == WAIT_PULLBACK
@@ -222,7 +190,7 @@ if barstate.isconfirmed and not na(atrVal) and atrVal > 0
                 if i_showFill and not na(stLabel)
                     label.set_text(stLabel, "EXP")
                     label.set_color(stLabel, color.gray)
-                f_reset()
+                doReset := true
 
             else
                 // Track max favorable
@@ -232,7 +200,6 @@ if barstate.isconfirmed and not na(atrVal) and atrVal > 0
 
                 // Check pullback sufficient
                 if stMaxFav >= pullMinD
-                    // Calculate limit price
                     obWidth = stOBHigh - stOBLow
                     offset  = math.max(obWidth * i_limitRatio, limitMinD)
 
@@ -245,7 +212,6 @@ if barstate.isconfirmed and not na(atrVal) and atrVal > 0
                         lim := math.max(lim, stOBHigh - obWidth * 0.4)
                         stLimitPrice := lim
 
-                    // Calculate SL/TP
                     [slD, slP, tpP] = f_calcSLTP(stLimitPrice, stOBHigh, stOBLow, stDir)
                     stSLDist  := slD
                     stSLPrice := slP
@@ -262,7 +228,7 @@ if barstate.isconfirmed and not na(atrVal) and atrVal > 0
                     if i_showFill and not na(stLabel)
                         label.set_text(stLabel, "INV")
                         label.set_color(stLabel, color.gray)
-                    f_reset()
+                    doReset := true
 
         // === LIMIT_ACTIVE: order is pending ===
         else if stState == LIMIT_ACTIVE
@@ -272,14 +238,14 @@ if barstate.isconfirmed and not na(atrVal) and atrVal > 0
                 if i_showFill and not na(stLabel)
                     label.set_text(stLabel, "EXP")
                     label.set_color(stLabel, color.gray)
-                f_reset()
+                doReset := true
 
             // Invalidation
             else if (stDir == 1 and low < stOBLow - obInvD) or (stDir == -1 and high > stOBHigh + obInvD)
                 if i_showFill and not na(stLabel)
                     label.set_text(stLabel, "INV")
                     label.set_color(stLabel, color.gray)
-                f_reset()
+                doReset := true
 
             // Check fill: limit must be inside the bar (gap condition)
             else if not na(stLimitPrice)
@@ -290,13 +256,11 @@ if barstate.isconfirmed and not na(atrVal) and atrVal > 0
                     canFill := true
 
                 if canFill
-                    // Recalculate SL/TP with CURRENT ATR (adaptive at fill time)
                     [slD, slP, tpP] = f_calcSLTP(stLimitPrice, stOBHigh, stOBLow, stDir)
                     stSLDist  := slD
                     stSLPrice := slP
                     stTPPrice := tpP
 
-                    // ENTER (limit entry con stop di protezione; SL/TP gestiti anche da strategy.exit)
                     if stDir == 1
                         strategy.entry("Long", strategy.long, limit=stLimitPrice, stop=stSLPrice)
                         strategy.exit("LongExit", "Long", limit=stTPPrice, stop=stSLPrice)
@@ -304,53 +268,54 @@ if barstate.isconfirmed and not na(atrVal) and atrVal > 0
                         strategy.entry("Short", strategy.short, limit=stLimitPrice, stop=stSLPrice)
                         strategy.exit("ShortExit", "Short", limit=stTPPrice, stop=stSLPrice)
 
-                    // Update label
                     if i_showFill and not na(stLabel)
                         slGp = stSLDist * 100
                         dirTxt = stDir == 1 ? "BUY" : "SELL"
-                        txt = dirTxt + " @" + str.tostring(stLimitPrice, format.mintick) +
-                              "\nSL " + str.tostring(stSLPrice, format.mintick) +
-                              "\nTP " + str.tostring(stTPPrice, format.mintick) +
-                              "\nSL " + str.tostring(math.round(slGp)) + "gp"
+                        txt = dirTxt + " @" + str.tostring(stLimitPrice, format.mintick) + "\nSL " + str.tostring(stSLPrice, format.mintick) + "\nTP " + str.tostring(stTPPrice, format.mintick) + "\nSL " + str.tostring(math.round(slGp)) + "gp"
                         label.set_text(stLabel, txt)
                         label.set_style(stLabel, stDir == 1 ? label.style_label_up : label.style_label_down)
                         label.set_color(stLabel, stDir == 1 ? color.new(#00d4aa, 20) : color.new(#ff4757, 20))
 
-                    stState := LIMIT_ACTIVE // stays, will reset when position closes
+    // ---- RESET (a livello principale: qui e' permesso modificare le globali) ----
+    if doReset
+        strategy.cancel_all()
+        stState      := IDLE
+        stOBHigh     := na
+        stOBLow      := na
+        stDir        := 0
+        stAge        := 0
+        stMaxFav     := 0.0
+        stLimitPrice := na
+        stSLPrice    := na
+        stTPPrice    := na
+        stSLDist     := 0.0
+        if not na(stBox)
+            box.delete(stBox)
+            stBox := na
+        if not na(stLabel)
+            label.delete(stLabel)
+            stLabel := na
 
 // ================================================================
 // INFO TABLE
 // ================================================================
 if i_showTable and barstate.islast
-    var table t = table.new(position.top_right, 2, 13,
-         bgcolor=color.new(#0d1117, 10), border_color=color.new(#30363d, 70),
-         frame_color=color.new(#30363d, 70), frame_width=1, border_width=1)
+    var table t = table.new(position.top_right, 2, 13, bgcolor=color.new(#0d1117, 10), border_color=color.new(#30363d, 70), frame_color=color.new(#30363d, 70), frame_width=1, border_width=1)
 
     table.cell(t, 0, 0,  "HYBRID LIMIT v5", text_color=#00d4aa, text_size=size.small)
     table.cell(t, 1, 0,  "XAUUSD Adaptive",  text_color=#8b949e, text_size=size.small)
-    table.cell(t, 0, 1,  "─────────────",    text_color=#30363d, text_size=size.tiny)
-    table.cell(t, 1, 1,  "─────────────",    text_color=#30363d, text_size=size.tiny)
-
     table.cell(t, 0, 2,  "ATR(20)",          text_color=#c9d1d9, text_size=size.tiny)
     table.cell(t, 1, 2,  str.tostring(atrVal, "#.##") + " $", text_color=#ffa657, text_size=size.tiny)
-
     table.cell(t, 0, 3,  "Scale",            text_color=#c9d1d9, text_size=size.tiny)
     table.cell(t, 1, 3,  str.tostring(scale, "#.##") + "x",   text_color=#ffa657, text_size=size.tiny)
-
     table.cell(t, 0, 4,  "Min Body",         text_color=#c9d1d9, text_size=size.tiny)
     table.cell(t, 1, 4,  str.tostring(minBodyD, "#.##") + " $", text_color=#ffa657, text_size=size.tiny)
-
     table.cell(t, 0, 5,  "OB Range $",       text_color=#c9d1d9, text_size=size.tiny)
     table.cell(t, 1, 5,  str.tostring(obMinD, "#.##") + " - " + str.tostring(obMaxD, "#.##"), text_color=#ffa657, text_size=size.tiny)
-
     table.cell(t, 0, 6,  "Pullback $",       text_color=#c9d1d9, text_size=size.tiny)
     table.cell(t, 1, 6,  str.tostring(pullMinD, "#.##") + " $", text_color=#ffa657, text_size=size.tiny)
-
     table.cell(t, 0, 7,  "SL Range $",       text_color=#c9d1d9, text_size=size.tiny)
     table.cell(t, 1, 7,  str.tostring(slMinD, "#.##") + " - " + str.tostring(slMaxD, "#.##"), text_color=#ffa657, text_size=size.tiny)
-
-    table.cell(t, 0, 8,  "─────────────",    text_color=#30363d, text_size=size.tiny)
-    table.cell(t, 1, 8,  "─────────────",    text_color=#30363d, text_size=size.tiny)
 
     sessTxt = inSession ? "SESSION" : (noFill ? "NO FILL" : "WAIT")
     sessClr = inSession ? #3fb950 : (noFill ? #f85149 : #8b949e)
@@ -372,13 +337,8 @@ if i_showTable and barstate.islast
     table.cell(t, 1, 12, str.tostring(strategy.netprofit, "#.##") + " $", text_color=pnlClr, text_size=size.tiny)
 
 // ================================================================
-// ALERTS (enable in inputs)
+// ALERTS
 // ================================================================
 if i_useAlerts
-    alertcondition(strategy.position_size != 0 and strategy.position_size[1] == 0,
-         title="Entry Filled",
-         message="HLv5 XAUUSD — {{strategy.order.action}} @ {{strategy.order.price}} | SL {{strategy.order.price}} TP {{strategy.order.price}}")
-
-    alertcondition(strategy.position_size == 0 and strategy.position_size[1] != 0,
-         title="Position Closed",
-         message="HLv5 XAUUSD — Closed | Net PnL: {{strategy.netprofit}}")
+    alertcondition(strategy.position_size != 0 and strategy.position_size[1] == 0, title="Entry Filled", message="HLv5 XAUUSD - Entry filled")
+    alertcondition(strategy.position_size == 0 and strategy.position_size[1] != 0, title="Position Closed", message="HLv5 XAUUSD - Position closed")
