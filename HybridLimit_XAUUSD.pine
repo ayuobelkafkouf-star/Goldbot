@@ -303,7 +303,7 @@ if barstate.isconfirmed and not na(atrVal) and atrVal > 0
 // INFO TABLE
 // ================================================================
 if i_showTable and barstate.islast
-    var table t = table.new(position.top_right, 2, 13, bgcolor=color.new(#0d1117, 10), border_color=color.new(#30363d, 70), frame_color=color.new(#30363d, 70), frame_width=1, border_width=1)
+    var table t = table.new(position.top_right, 2, 16, bgcolor=color.new(#0d1117, 10), border_color=color.new(#30363d, 70), frame_color=color.new(#30363d, 70), frame_width=1, border_width=1)
 
     table.cell(t, 0, 0,  "HYBRID LIMIT v5", text_color=#00d4aa, text_size=size.small)
     table.cell(t, 1, 0,  "XAUUSD Adaptive",  text_color=#8b949e, text_size=size.small)
@@ -338,6 +338,17 @@ if i_showTable and barstate.islast
     pnlClr = strategy.netprofit >= 0 ? #3fb950 : #f85149
     table.cell(t, 0, 12, "Net PnL",         text_color=#c9d1d9, text_size=size.tiny)
     table.cell(t, 1, 12, str.tostring(strategy.netprofit, "#.##") + " $", text_color=pnlClr, text_size=size.tiny)
+
+    winRate = strategy.closedtrades > 0 ? 100.0 * strategy.wintrades / strategy.closedtrades : 0.0
+    pf      = strategy.grossloss > 0 ? strategy.grossprofit / strategy.grossloss : 0.0
+    wrClr   = strategy.closedtrades == 0 ? #8b949e : (winRate >= 50 ? #3fb950 : #f85149)
+    pfClr   = strategy.closedtrades == 0 ? #8b949e : (pf >= 1 ? #3fb950 : #f85149)
+    table.cell(t, 0, 13, "Trades",          text_color=#c9d1d9, text_size=size.tiny)
+    table.cell(t, 1, 13, str.tostring(strategy.closedtrades), text_color=#ffa657, text_size=size.tiny)
+    table.cell(t, 0, 14, "Win Rate",        text_color=#c9d1d9, text_size=size.tiny)
+    table.cell(t, 1, 14, str.tostring(winRate, "#.#") + " %", text_color=wrClr, text_size=size.tiny)
+    table.cell(t, 0, 15, "Profit Factor",   text_color=#c9d1d9, text_size=size.tiny)
+    table.cell(t, 1, 15, str.tostring(pf, "#.##"), text_color=pfClr, text_size=size.tiny)
 
 // ================================================================
 // ALERTS
