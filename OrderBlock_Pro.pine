@@ -143,25 +143,12 @@ f_qty(_d) =>
 // Box rosso = distanza dall'ingresso allo STOP.
 // Box verde = distanza dall'ingresso al TARGET (TP1).
 // Linea nera tratteggiata = prezzo di ingresso.
+// NB: in Pine non si può riassegnare una var globale dentro una funzione,
+// quindi il disegno è fatto INLINE nei blocchi di ingresso (vedi sotto).
 var box  trade_sl_box  = na   // zona verso lo stop (rossa)
 var box  trade_tp_box  = na   // zona verso il target (verde)
 var line trade_entry_l = na   // linea di ingresso
 var bool trade_drawing = false
-
-f_open_trade(_entry, _stop, _target) =>
-    if show_trade
-        box.delete(trade_sl_box)
-        box.delete(trade_tp_box)
-        line.delete(trade_entry_l)
-        // top/bot corretti indipendentemente dal verso
-        sl_t = math.max(_entry, _stop)
-        sl_b = math.min(_entry, _stop)
-        tp_t = math.max(_entry, _target)
-        tp_b = math.min(_entry, _target)
-        trade_sl_box := box.new(bar_index, sl_t, bar_index + 15, sl_b, bgcolor=color.new(color.red, 80), border_color=color.new(color.red, 40), border_width=1)
-        trade_tp_box := box.new(bar_index, tp_t, bar_index + 15, tp_b, bgcolor=color.new(color.green, 80), border_color=color.new(color.green, 40), border_width=1)
-        trade_entry_l := line.new(bar_index, _entry, bar_index + 15, _entry, color=color.new(color.black, 0), style=line.style_dashed, width=1)
-        trade_drawing := true
 
 // ─── STATO POSIZIONE ───────────────────────────────────────────
 var float pos_sl  = na
@@ -179,7 +166,14 @@ if buy_signal and risk_buy > 0
     sig_buy_bar := bar_index
     strategy.entry("LONG", strategy.long, qty=f_qty(risk_buy))
     strategy.exit("LONG_X", from_entry="LONG", stop=pos_sl)
-    f_open_trade(close, sl_buy, tp1_buy)
+    if show_trade
+        box.delete(trade_sl_box)
+        box.delete(trade_tp_box)
+        line.delete(trade_entry_l)
+        trade_sl_box  := box.new(bar_index, close, bar_index + 15, sl_buy,  bgcolor=color.new(color.red, 80),   border_color=color.new(color.red, 40),   border_width=1)
+        trade_tp_box  := box.new(bar_index, tp1_buy, bar_index + 15, close, bgcolor=color.new(color.green, 80), border_color=color.new(color.green, 40), border_width=1)
+        trade_entry_l := line.new(bar_index, close, bar_index + 15, close, color=color.new(color.black, 0), style=line.style_dashed, width=1)
+        trade_drawing := true
     alert("🟢 OB BUY\nEntry: " + str.tostring(close,"#.##") + "\nSL: " + str.tostring(pos_sl,"#.##") + "\nTP1: " + str.tostring(pos_tp1,"#.##"), alert.freq_once_per_bar_close)
 
 if sell_signal and risk_sell > 0
@@ -190,7 +184,14 @@ if sell_signal and risk_sell > 0
     sig_sell_bar := bar_index
     strategy.entry("SHORT", strategy.short, qty=f_qty(risk_sell))
     strategy.exit("SHORT_X", from_entry="SHORT", stop=pos_sl)
-    f_open_trade(close, sl_sell, tp1_sell)
+    if show_trade
+        box.delete(trade_sl_box)
+        box.delete(trade_tp_box)
+        line.delete(trade_entry_l)
+        trade_sl_box  := box.new(bar_index, sl_sell, bar_index + 15, close,    bgcolor=color.new(color.red, 80),   border_color=color.new(color.red, 40),   border_width=1)
+        trade_tp_box  := box.new(bar_index, close, bar_index + 15, tp1_sell,   bgcolor=color.new(color.green, 80), border_color=color.new(color.green, 40), border_width=1)
+        trade_entry_l := line.new(bar_index, close, bar_index + 15, close, color=color.new(color.black, 0), style=line.style_dashed, width=1)
+        trade_drawing := true
     alert("🔴 OB SELL\nEntry: " + str.tostring(close,"#.##") + "\nSL: " + str.tostring(pos_sl,"#.##") + "\nTP1: " + str.tostring(pos_tp1,"#.##"), alert.freq_once_per_bar_close)
 
 // ─── TP1 PARZIALE + BE + TRAILING ──────────────────────────────
