@@ -1,23 +1,12 @@
 //@version=5
 strategy("HYBRID LIMIT v5 XAUUSD AGGRESSIVE", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=0.5, pyramiding=0, calc_on_every_tick=false, max_bars_back=500, slippage=5, commission_value=0.22, commission_type=strategy.commission.cash_per_contract)
 
-// HYBRID LIMIT v5 - XAUUSD Adaptive
+// HYBRID LIMIT v5 - XAUUSD Adaptive (AGGRESSIVE + TP1/TP2)
 //
-// BACKTEST RESULTS (2020-2026, M15, 639 trades):
-//   RR 1:1  -> WR 70% | PF 2.23 | 86% mesi positivi
-//   RR 1:2  -> WR 47% | PF 1.95 | max PnL assoluto
-//   IS/OOS  -> PF migliora out-of-sample (2.15 -> 2.31)
-//
-// REQUIREMENTS:
-//   - Broker ECN con spread < 0.15$ (IC Raw / Pepperstone Raw)
-//   - Timeframe: 15 minuti
-//   - Risk: 0.5% per trade
-//
-// NOTA Pine v5:
-//   - //@version=5 DEVE essere la riga 1 assoluta (niente sopra, nemmeno spazi).
-//   - '$' non e' valido nei nomi: le variabili in dollari usano il suffisso "D".
-//   - Una funzione NON puo' modificare variabili globali: il reset e' gestito
-//     con il flag doReset a livello principale.
+// Versione con filtri allentati (piu' trade) e gestione a due target:
+//   - TP1 con chiusura parziale, TP2 sul resto
+//   - SL a break-even dopo TP1
+//   - Linee Entry/SL/TP1/TP2 disegnate sul grafico
 
 // ================================================================
 // INPUTS
@@ -42,7 +31,7 @@ i_fxOBMin    = input.float(5,    "OB Min Width",             group=GRP3)
 i_fxOBMax    = input.float(45,   "OB Max Width",             group=GRP3)
 i_obExpiry   = input.int(40,     "OB Expiry (bars)",         minval=10, maxval=100, group=GRP3)
 
-// --- Entry / SL / TP ---
+// --- Entry / SL ---
 string GRP4 = "Entry & Risk (forex pips, scaled auto)"
 i_fxPullMin  = input.float(8,   "Pullback Min",             group=GRP4)
 i_limitRatio = input.float(0.30, "Limit Offset %",          step=0.05, group=GRP4, tooltip="Limit at 30% into OB from edge")
@@ -52,7 +41,15 @@ i_fxSLNoise  = input.float(0.5,  "SL Noise",                 group=GRP4)
 i_fxSLMin    = input.float(6,    "SL Min Clamp",             group=GRP4)
 i_fxSLMax    = input.float(22,   "SL Max Clamp",             group=GRP4)
 i_fxOBInv    = input.float(5,    "Invalidate Distance",      group=GRP4)
-i_rrRatio    = input.float(1.0,  "TP/SL Ratio",             step=0.5, group=GRP4, tooltip="1.0=1:1 (consistente), 2.0=1:2 (max PnL)")
+
+// --- TP1 / TP2 (scale-out) ---
+string GRP6 = "TP1 / TP2 (scale-out)"
+i_useScaleOut = input.bool(true,  "Usa TP1/TP2 scale-out",     group=GRP6, tooltip="Se OFF usa un solo TP a TP2 Ratio")
+i_rr1         = input.float(1.0,  "TP1 Ratio (RR)", step=0.1,  group=GRP6, tooltip="Distanza TP1 = RR * SL")
+i_rr2         = input.float(2.0,  "TP2 Ratio (RR)", step=0.1,  group=GRP6, tooltip="Distanza TP2 = RR * SL")
+i_tp1Pct      = input.float(50,   "% chiuso a TP1", minval=1, maxval=99, group=GRP6)
+i_beAfterTp1  = input.bool(true,  "SL a break-even dopo TP1",  group=GRP6)
+i_drawLevels  = input.bool(true,  "Disegna Entry/SL/TP1/TP2",  group=GRP6)
 
 // --- Display ---
 string GRP5 = "Display"
@@ -66,9 +63,6 @@ i_useAlerts  = input.bool(false, "Enable Alerts",            group=GRP5)
 // ================================================================
 atrVal       = ta.atr(i_atrPeriod)
 scale        = atrVal / i_fxRefATR
-// scale e' gia' il valore in $ per "pip-forex" (goldATR$ / forexATR-pips).
-// NB: l'originale aveva "scale * 0.01" che rendeva le soglie ~100x troppo
-// piccole (OB max 0.24$), per cui su oro non scattava mai nessun trade.
 pipGold      = scale
 minBodyD     = i_fxMinBody  * pipGold
 obMinD       = i_fxOBMin    * pipGold
@@ -111,28 +105,36 @@ var float  stImpulseATR   = na
 var box    stBox          = na
 var label  stLabel        = na
 
+// --- Trade / levels state ---
+var float  eEntry   = na
+var float  eSL      = na
+var float  eTP1     = na
+var float  eTP2     = na
+var int    eDir     = 0
+var bool   eTp1Done = false
+var line   lnEntry  = na
+var line   lnSL     = na
+var line   lnTP1    = na
+var line   lnTP2    = na
+
 // ================================================================
-// UTILITY: Compute SL/TP from limit price
-// (le funzioni possono modificare solo variabili LOCALI)
+// UTILITY: Compute SL distance from limit price
 // ================================================================
-f_calcSLTP(float limP, float zH, float zL, int dir) =>
+f_calcSL(float limP, float zH, float zL, int dir) =>
     float slDist = 0.0
     float slP    = na
-    float tpP    = na
     float slRaw  = 0.0
 
     if dir == 1
         slRaw  := (limP - zL) + slBufD + slNoiseD
         slDist := math.max(slMinD, math.min(slRaw, slMaxD))
         slP    := limP - slDist
-        tpP    := limP + slDist * i_rrRatio
     else
         slRaw  := (zH - limP) + slBufD + slNoiseD
         slDist := math.max(slMinD, math.min(slRaw, slMaxD))
         slP    := limP + slDist
-        tpP    := limP - slDist * i_rrRatio
 
-    [slDist, slP, tpP]
+    [slDist, slP]
 
 // ================================================================
 // MAIN LOGIC (runs on bar close)
@@ -148,9 +150,21 @@ if barstate.isconfirmed and not na(atrVal) and atrVal > 0
     if doForceClose and strategy.position_size != 0
         strategy.close_all(comment="FC")
 
-    // ---- IN TRADE: let strategy.exit handle SL/TP ----
+    // ---- IN TRADE: manage break-even after TP1 ----
     if strategy.position_size != 0
         stState := LIMIT_ACTIVE  // stay here until flat
+        if i_useScaleOut and i_beAfterTp1 and not eTp1Done and not na(eTP1)
+            hitTp1 = (eDir == 1 and high >= eTP1) or (eDir == -1 and low <= eTP1)
+            if hitTp1
+                eTp1Done := true
+                eSL := eEntry
+                if eDir == 1
+                    strategy.exit("TP2", "Long", limit=eTP2, stop=eSL)
+                else
+                    strategy.exit("TP2", "Short", limit=eTP2, stop=eSL)
+                if i_drawLevels and not na(lnSL)
+                    line.set_y1(lnSL, eSL)
+                    line.set_y2(lnSL, eSL)
 
     // ---- STATE MACHINE (only when flat) ----
     if strategy.position_size == 0
@@ -188,7 +202,6 @@ if barstate.isconfirmed and not na(atrVal) and atrVal > 0
         else if stState == WAIT_PULLBACK
             stAge += 1
 
-            // Expiry
             if stAge > i_obExpiry or noFill
                 if i_showFill and not na(stLabel)
                     label.set_text(stLabel, "EXP")
@@ -196,12 +209,10 @@ if barstate.isconfirmed and not na(atrVal) and atrVal > 0
                 doReset := true
 
             else
-                // Track max favorable
                 fav = stDir == 1 ? (high - stOBHigh) : (stOBLow - low)
                 if fav > stMaxFav
                     stMaxFav := fav
 
-                // Check pullback sufficient
                 if stMaxFav >= pullMinD
                     obWidth = stOBHigh - stOBLow
                     offset  = math.max(obWidth * i_limitRatio, limitMinD)
@@ -215,10 +226,9 @@ if barstate.isconfirmed and not na(atrVal) and atrVal > 0
                         lim := math.max(lim, stOBHigh - obWidth * 0.4)
                         stLimitPrice := lim
 
-                    [slD, slP, tpP] = f_calcSLTP(stLimitPrice, stOBHigh, stOBLow, stDir)
+                    [slD, slP] = f_calcSL(stLimitPrice, stOBHigh, stOBLow, stDir)
                     stSLDist  := slD
                     stSLPrice := slP
-                    stTPPrice := tpP
 
                     stState := LIMIT_ACTIVE
 
@@ -226,7 +236,6 @@ if barstate.isconfirmed and not na(atrVal) and atrVal > 0
                         label.set_text(stLabel, "READY")
                         label.set_color(stLabel, stDir == 1 ? #00d4aa : #ff4757)
 
-                // Invalidation
                 else if (stDir == 1 and low < stOBLow - obInvD) or (stDir == -1 and high > stOBHigh + obInvD)
                     if i_showFill and not na(stLabel)
                         label.set_text(stLabel, "INV")
@@ -243,14 +252,12 @@ if barstate.isconfirmed and not na(atrVal) and atrVal > 0
                     label.set_color(stLabel, color.gray)
                 doReset := true
 
-            // Invalidation
             else if (stDir == 1 and low < stOBLow - obInvD) or (stDir == -1 and high > stOBHigh + obInvD)
                 if i_showFill and not na(stLabel)
                     label.set_text(stLabel, "INV")
                     label.set_color(stLabel, color.gray)
                 doReset := true
 
-            // Check fill: limit must be inside the bar (gap condition)
             else if not na(stLimitPrice)
                 canFill = false
                 if stDir == 1 and low <= stLimitPrice and open > stLimitPrice
@@ -259,27 +266,61 @@ if barstate.isconfirmed and not na(atrVal) and atrVal > 0
                     canFill := true
 
                 if canFill
-                    [slD, slP, tpP] = f_calcSLTP(stLimitPrice, stOBHigh, stOBLow, stDir)
+                    [slD, slP] = f_calcSL(stLimitPrice, stOBHigh, stOBLow, stDir)
                     stSLDist  := slD
                     stSLPrice := slP
-                    stTPPrice := tpP
+
+                    // TP1 / TP2 dai rapporti RR
+                    tp1p = stDir == 1 ? stLimitPrice + slD * i_rr1 : stLimitPrice - slD * i_rr1
+                    tp2p = stDir == 1 ? stLimitPrice + slD * i_rr2 : stLimitPrice - slD * i_rr2
+                    stTPPrice := tp2p
+
+                    // memorizza trade
+                    eEntry   := stLimitPrice
+                    eSL      := slP
+                    eTP1     := tp1p
+                    eTP2     := tp2p
+                    eDir     := stDir
+                    eTp1Done := false
 
                     if stDir == 1
-                        strategy.entry("Long", strategy.long, limit=stLimitPrice, stop=stSLPrice)
-                        strategy.exit("LongExit", "Long", limit=stTPPrice, stop=stSLPrice)
+                        strategy.entry("Long", strategy.long, limit=stLimitPrice)
+                        if i_useScaleOut
+                            strategy.exit("TP1", "Long", qty_percent=i_tp1Pct, limit=tp1p, stop=slP)
+                            strategy.exit("TP2", "Long", limit=tp2p, stop=slP)
+                        else
+                            strategy.exit("LongExit", "Long", limit=tp2p, stop=slP)
                     else
-                        strategy.entry("Short", strategy.short, limit=stLimitPrice, stop=stSLPrice)
-                        strategy.exit("ShortExit", "Short", limit=stTPPrice, stop=stSLPrice)
+                        strategy.entry("Short", strategy.short, limit=stLimitPrice)
+                        if i_useScaleOut
+                            strategy.exit("TP1", "Short", qty_percent=i_tp1Pct, limit=tp1p, stop=slP)
+                            strategy.exit("TP2", "Short", limit=tp2p, stop=slP)
+                        else
+                            strategy.exit("ShortExit", "Short", limit=tp2p, stop=slP)
+
+                    // disegna i livelli
+                    if i_drawLevels
+                        if not na(lnEntry)
+                            line.delete(lnEntry)
+                        if not na(lnSL)
+                            line.delete(lnSL)
+                        if not na(lnTP1)
+                            line.delete(lnTP1)
+                        if not na(lnTP2)
+                            line.delete(lnTP2)
+                        lnEntry := line.new(bar_index, eEntry, bar_index + 1, eEntry, color=color.gray, style=line.style_dashed, width=1, extend=extend.right)
+                        lnSL    := line.new(bar_index, eSL,    bar_index + 1, eSL,    color=#f85149,     style=line.style_solid,  width=1, extend=extend.right)
+                        lnTP1   := line.new(bar_index, eTP1,   bar_index + 1, eTP1,   color=#3fb950,     style=line.style_dotted, width=1, extend=extend.right)
+                        lnTP2   := line.new(bar_index, eTP2,   bar_index + 1, eTP2,   color=#00d4aa,     style=line.style_solid,  width=1, extend=extend.right)
 
                     if i_showFill and not na(stLabel)
-                        slGp = stSLDist * 100
                         dirTxt = stDir == 1 ? "BUY" : "SELL"
-                        txt = dirTxt + " @" + str.tostring(stLimitPrice, format.mintick) + "\nSL " + str.tostring(stSLPrice, format.mintick) + "\nTP " + str.tostring(stTPPrice, format.mintick) + "\nSL " + str.tostring(math.round(slGp)) + "gp"
+                        txt = dirTxt + " @" + str.tostring(stLimitPrice, format.mintick) + "\nSL " + str.tostring(slP, format.mintick) + "\nTP1 " + str.tostring(tp1p, format.mintick) + "\nTP2 " + str.tostring(tp2p, format.mintick)
                         label.set_text(stLabel, txt)
                         label.set_style(stLabel, stDir == 1 ? label.style_label_up : label.style_label_down)
                         label.set_color(stLabel, stDir == 1 ? color.new(#00d4aa, 20) : color.new(#ff4757, 20))
 
-    // ---- RESET (a livello principale: qui e' permesso modificare le globali) ----
+    // ---- RESET (a livello principale) ----
     if doReset
         strategy.cancel_all()
         stState      := IDLE
@@ -306,7 +347,7 @@ if i_showTable and barstate.islast
     var table t = table.new(position.top_right, 2, 16, bgcolor=color.new(#0d1117, 10), border_color=color.new(#30363d, 70), frame_color=color.new(#30363d, 70), frame_width=1, border_width=1)
 
     table.cell(t, 0, 0,  "HYBRID LIMIT v5", text_color=#00d4aa, text_size=size.small)
-    table.cell(t, 1, 0,  "XAUUSD Adaptive",  text_color=#8b949e, text_size=size.small)
+    table.cell(t, 1, 0,  "AGGRESSIVE",  text_color=#8b949e, text_size=size.small)
     table.cell(t, 0, 2,  "ATR(20)",          text_color=#c9d1d9, text_size=size.tiny)
     table.cell(t, 1, 2,  str.tostring(atrVal, "#.##") + " $", text_color=#ffa657, text_size=size.tiny)
     table.cell(t, 0, 3,  "Scale",            text_color=#c9d1d9, text_size=size.tiny)
@@ -353,5 +394,5 @@ if i_showTable and barstate.islast
 // ================================================================
 // ALERTS
 // ================================================================
-alertcondition(i_useAlerts and strategy.position_size != 0 and strategy.position_size[1] == 0, title="Entry Filled", message="HLv5 XAUUSD - Entry filled")
-alertcondition(i_useAlerts and strategy.position_size == 0 and strategy.position_size[1] != 0, title="Position Closed", message="HLv5 XAUUSD - Position closed")
+alertcondition(i_useAlerts and strategy.position_size != 0 and strategy.position_size[1] == 0, title="Entry Filled", message="HLv5 XAUUSD AGG - Entry filled")
+alertcondition(i_useAlerts and strategy.position_size == 0 and strategy.position_size[1] != 0, title="Position Closed", message="HLv5 XAUUSD AGG - Position closed")
