@@ -1,24 +1,21 @@
 //@version=5
-// ©️ HYBRID LIMIT v5 — XAUUSD Adaptive
+strategy("HYBRID LIMIT v5 XAUUSD", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=0.5, pyramiding=0, calc_on_every_tick=false, max_bars_back=500, slippage=5, commission_value=0.22, commission_type=strategy.commission.per_contract)
+
+// HYBRID LIMIT v5 - XAUUSD Adaptive
 //
 // BACKTEST RESULTS (2020-2026, M15, 639 trades):
-//   RR 1:1  → WR 70% | PF 2.23 | 86% mesi positivi
-//   RR 1:2  → WR 47% | PF 1.95 | max PnL assoluto
-//   IS/OOS  → PF migliora out-of-sample (2.15 → 2.31)
+//   RR 1:1  -> WR 70% | PF 2.23 | 86% mesi positivi
+//   RR 1:2  -> WR 47% | PF 1.95 | max PnL assoluto
+//   IS/OOS  -> PF migliora out-of-sample (2.15 -> 2.31)
 //
 // REQUIREMENTS:
-//   - Broker ECN con spread < $0.15 (IC Raw / Pepperstone Raw)
+//   - Broker ECN con spread < 0.15$ (IC Raw / Pepperstone Raw)
 //   - Timeframe: 15 minuti
 //   - Risk: 0.5% per trade
 //
 // NOTA 1: la direttiva //@version=5 DEVE essere la prima riga dello script.
 // NOTA 2: in Pine Script il carattere '$' NON e' valido negli identificatori.
 //         Le variabili "in dollari" usano quindi il suffisso "D" (es. minBodyD).
-
-strategy("HYBRID LIMIT v5 — XAUUSD", overlay=true,
-     default_qty_type=strategy.percent_of_equity, default_qty_value=0.5,
-     pyramiding=0, calc_on_every_tick=false, max_bars_back=500,
-     slippage=5, commission_value=0.22, commission_type=strategy.commission.per_contract)
 
 // ================================================================
 // INPUTS
