@@ -66,7 +66,10 @@ i_useAlerts  = input.bool(false, "Enable Alerts",            group=GRP5)
 // ================================================================
 atrVal       = ta.atr(i_atrPeriod)
 scale        = atrVal / i_fxRefATR
-pipGold      = scale * 0.01
+// scale e' gia' il valore in $ per "pip-forex" (goldATR$ / forexATR-pips).
+// NB: l'originale aveva "scale * 0.01" che rendeva le soglie ~100x troppo
+// piccole (OB max 0.24$), per cui su oro non scattava mai nessun trade.
+pipGold      = scale
 minBodyD     = i_fxMinBody  * pipGold
 obMinD       = i_fxOBMin    * pipGold
 obMaxD       = i_fxOBMax    * pipGold
