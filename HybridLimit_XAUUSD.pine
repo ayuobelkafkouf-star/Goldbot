@@ -1,3 +1,4 @@
+//@version=5
 // ©️ HYBRID LIMIT v5 — XAUUSD Adaptive
 //
 // BACKTEST RESULTS (2020-2026, M15, 639 trades):
@@ -10,10 +11,10 @@
 //   - Timeframe: 15 minuti
 //   - Risk: 0.5% per trade
 //
-// NOTA: in Pine Script il carattere '$' NON e' valido negli identificatori.
-// Le variabili "in dollari" usano quindi il suffisso "D" (es. minBodyD).
+// NOTA 1: la direttiva //@version=5 DEVE essere la prima riga dello script.
+// NOTA 2: in Pine Script il carattere '$' NON e' valido negli identificatori.
+//         Le variabili "in dollari" usano quindi il suffisso "D" (es. minBodyD).
 
-//@version=5
 strategy("HYBRID LIMIT v5 — XAUUSD", overlay=true,
      default_qty_type=strategy.percent_of_equity, default_qty_value=0.5,
      pyramiding=0, calc_on_every_tick=false, max_bars_back=500,
