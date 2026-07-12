@@ -1,0 +1,257 @@
+//@version=5
+// ╔══════════════════════════════════════════════════════════════╗
+// ║  OrderBlock Pro — Smart Money / Order Block strategy          ║
+// ║  Universale: ORO (XAUUSD) e BITCOIN (BTCUSD).                  ║
+// ║  Logica: rilevo una rottura di struttura (BOS), segno         ║
+// ║  l'ULTIMA candela contraria prima del movimento (= order      ║
+// ║  block). Quando il prezzo RIENTRA nella zona, entro nel        ║
+// ║  verso del trend. SL oltre l'OB, TP1 parziale + trailing.      ║
+// ║  Consigliato su H1 / M15.                                      ║
+// ╚══════════════════════════════════════════════════════════════╝
+strategy("OrderBlock Pro", shorttitle="OB Pro", overlay=true,
+  default_qty_type=strategy.percent_of_equity, default_qty_value=10,
+  commission_type=strategy.commission.percent, commission_value=0.02,
+  slippage=2, process_orders_on_close=true,
+  max_lines_count=200, max_labels_count=300, max_boxes_count=300)
+
+// ─── STRUTTURA / ORDER BLOCK ───────────────────────────────────
+pivot_len   = input.int(5,  "Sensibilità struttura (pivot)", group="Order Block", minval=2, maxval=30, tooltip="Più basso = rileva swing piccoli (più segnali). Più alto = solo strutture importanti.")
+ob_lookback = input.int(15, "Ricerca candela OB (barre)",    group="Order Block", minval=3, maxval=50, tooltip="Quante barre indietro cercare l'ultima candela contraria prima della rottura.")
+ob_zone     = input.string("Completa (mecha+stoppino)", "Zona dell'order block", options=["Completa (mecha+stoppino)", "Solo corpo (open-close)"], group="Order Block", tooltip="Completa = high/low della candela (zona ampia, SL più largo). Solo corpo = open/close (zona stretta, SL più vicino).")
+one_touch   = input.bool(true, "Entra al primo tocco della zona", group="Order Block", tooltip="ON = entra appena il prezzo rientra nell'OB. OFF = aspetta candela di conferma dentro la zona.")
+
+// ─── BIAS / FILTRI ─────────────────────────────────────────────
+use_htf  = input.bool(true, "Filtro trend superiore", group="Filtri", tooltip="Prende SOLO order block nel verso del trend del timeframe alto.")
+htf      = input.timeframe("240", "Timeframe del bias", group="Filtri")
+htf_fast = input.int(21, "Bias EMA veloce", group="Filtri", minval=5, maxval=100)
+htf_slow = input.int(55, "Bias EMA lenta",  group="Filtri", minval=10, maxval=200)
+use_adx       = input.bool(true, "Filtro ADX (no laterale)", group="Filtri")
+adx_threshold = input.float(23.0, "Soglia ADX minima", group="Filtri", minval=10.0, maxval=50.0, step=1.0)
+
+// ─── RISCHIO / USCITE ──────────────────────────────────────────
+risk_pct   = input.float(0.75, "Rischio % per trade", group="Rischio", minval=0.1, maxval=5.0, step=0.05)
+sl_buf     = input.float(0.3, "SL buffer ATR (oltre l'OB)", group="Rischio", minval=0.0, maxval=3.0, step=0.1)
+tp1_r      = input.float(1.8, "TP1 in multipli di rischio (R)", group="Rischio", minval=0.3, maxval=10.0, step=0.1)
+tp1_pct    = input.float(70,  "% chiusura a TP1", group="Rischio", minval=10, maxval=90, tooltip="Banca questa parte a TP1, il resto cavalca col trailing.")
+use_be     = input.bool(true, "Break-even dopo TP1", group="Rischio")
+trail_mult = input.float(2.5, "Trailing ATR mult (runner)", group="Rischio", minval=0.5, maxval=10.0, step=0.25)
+
+// ─── SCADENZA OB ───────────────────────────────────────────────
+ob_expiry = input.int(60, "Validità OB (barre max)", group="Order Block", minval=5, maxval=300, tooltip="Se il prezzo non rientra entro queste barre, l'order block scade.")
+
+show_boxes = input.bool(true, "Disegna le zone Order Block", group="Grafica")
+
+// ─── DATI ──────────────────────────────────────────────────────
+atr = ta.atr(14)
+[_dip, _dim, adx] = ta.dmi(14, 14)
+adx_ok = not use_adx or adx >= adx_threshold
+
+[htfF, htfS] = request.security(syminfo.tickerid, htf, [ta.ema(close, htf_fast)[1], ta.ema(close, htf_slow)[1]], lookahead=barmerge.lookahead_off)
+htf_bull = not use_htf or htfF > htfS
+htf_bear = not use_htf or htfF < htfS
+
+// ─── STRUTTURA: ultimi swing confermati ────────────────────────
+ph = ta.pivothigh(high, pivot_len, pivot_len)
+pl = ta.pivotlow(low,  pivot_len, pivot_len)
+var float last_ph = na
+var float last_pl = na
+if not na(ph)
+    last_ph := ph
+if not na(pl)
+    last_pl := pl
+
+// Rottura di struttura
+bos_up   = not na(last_ph) and close > last_ph and close[1] <= last_ph
+bos_down = not na(last_pl) and close < last_pl and close[1] >= last_pl
+
+// ─── ORDER BLOCK RIALZISTA (su BOS up = ultima candela ribassista) ─
+var float bull_top = na
+var float bull_bot = na
+var bool  bull_on  = false
+var int   bull_bar = 0
+var box   bull_box = na
+
+if bos_up
+    for i = 1 to ob_lookback
+        if close[i] < open[i]
+            t = ob_zone == "Solo corpo (open-close)" ? math.max(open[i], close[i]) : high[i]
+            b = ob_zone == "Solo corpo (open-close)" ? math.min(open[i], close[i]) : low[i]
+            bull_top := t
+            bull_bot := b
+            bull_on  := true
+            bull_bar := bar_index
+            if show_boxes
+                box.delete(bull_box)
+                bull_box := box.new(bar_index - i, t, bar_index + 10, b, bgcolor=color.new(color.green, 82), border_color=color.new(color.green, 30), text="OB ▲", text_color=color.green, text_size=size.tiny)
+            break
+
+// ─── ORDER BLOCK RIBASSISTA (su BOS down = ultima candela rialzista) ─
+var float bear_top = na
+var float bear_bot = na
+var bool  bear_on  = false
+var int   bear_bar = 0
+var box   bear_box = na
+
+if bos_down
+    for i = 1 to ob_lookback
+        if close[i] > open[i]
+            t = ob_zone == "Solo corpo (open-close)" ? math.max(open[i], close[i]) : high[i]
+            b = ob_zone == "Solo corpo (open-close)" ? math.min(open[i], close[i]) : low[i]
+            bear_top := t
+            bear_bot := b
+            bear_on  := true
+            bear_bar := bar_index
+            if show_boxes
+                box.delete(bear_box)
+                bear_box := box.new(bar_index - i, t, bar_index + 10, b, bgcolor=color.new(color.red, 82), border_color=color.new(color.red, 30), text="OB ▼", text_color=color.red, text_size=size.tiny)
+            break
+
+// ─── SCADENZA / INVALIDAZIONE OB ───────────────────────────────
+if bull_on
+    if close < bull_bot or (bar_index - bull_bar) > ob_expiry
+        bull_on := false
+if bear_on
+    if close > bear_top or (bar_index - bear_bar) > ob_expiry
+        bear_on := false
+
+// ─── CONDIZIONI DI INGRESSO (rientro nella zona) ───────────────
+touch_bull = bull_on and low  <= bull_top and high >= bull_bot
+touch_bear = bear_on and high >= bear_bot and low  <= bear_top
+confirm_bull = one_touch or close > open
+confirm_bear = one_touch or close < open
+
+flat = strategy.position_size == 0
+buy_signal  = bull_on and touch_bull and confirm_bull and htf_bull and adx_ok and flat
+sell_signal = bear_on and touch_bear and confirm_bear and htf_bear and adx_ok and flat
+
+// ─── SL / TP ───────────────────────────────────────────────────
+sl_buy  = bull_bot - atr * sl_buf
+sl_sell = bear_top + atr * sl_buf
+risk_buy  = close - sl_buy
+risk_sell = sl_sell - close
+tp1_buy  = close + tp1_r * risk_buy
+tp1_sell = close - tp1_r * risk_sell
+
+f_qty(_d) =>
+    rc = strategy.equity * (risk_pct / 100.0)
+    _d > 0 ? rc / _d : 0.0
+
+// ─── STATO POSIZIONE ───────────────────────────────────────────
+var float pos_sl  = na
+var float pos_tp1 = na
+var bool  be_act  = false
+var float trail   = na
+var int   sig_buy_bar  = 0
+var int   sig_sell_bar = 0
+
+if buy_signal and risk_buy > 0
+    pos_sl  := sl_buy
+    pos_tp1 := tp1_buy
+    be_act  := false
+    bull_on := false
+    sig_buy_bar := bar_index
+    strategy.entry("LONG", strategy.long, qty=f_qty(risk_buy))
+    strategy.exit("LONG_X", from_entry="LONG", stop=pos_sl)
+    alert("🟢 OB BUY\nEntry: " + str.tostring(close,"#.##") + "\nSL: " + str.tostring(pos_sl,"#.##") + "\nTP1: " + str.tostring(pos_tp1,"#.##"), alert.freq_once_per_bar_close)
+
+if sell_signal and risk_sell > 0
+    pos_sl  := sl_sell
+    pos_tp1 := tp1_sell
+    be_act  := false
+    bear_on := false
+    sig_sell_bar := bar_index
+    strategy.entry("SHORT", strategy.short, qty=f_qty(risk_sell))
+    strategy.exit("SHORT_X", from_entry="SHORT", stop=pos_sl)
+    alert("🔴 OB SELL\nEntry: " + str.tostring(close,"#.##") + "\nSL: " + str.tostring(pos_sl,"#.##") + "\nTP1: " + str.tostring(pos_tp1,"#.##"), alert.freq_once_per_bar_close)
+
+// ─── TP1 PARZIALE + BE + TRAILING ──────────────────────────────
+if strategy.position_size > 0 and not be_act and not na(pos_tp1) and high >= pos_tp1
+    strategy.close("LONG", qty_percent=tp1_pct, comment="TP1")
+    be_act := true
+    trail  := use_be ? strategy.position_avg_price : pos_sl
+    strategy.exit("LONG_X", from_entry="LONG", stop=trail)
+if strategy.position_size < 0 and not be_act and not na(pos_tp1) and low <= pos_tp1
+    strategy.close("SHORT", qty_percent=tp1_pct, comment="TP1")
+    be_act := true
+    trail  := use_be ? strategy.position_avg_price : pos_sl
+    strategy.exit("SHORT_X", from_entry="SHORT", stop=trail)
+
+if be_act
+    if strategy.position_size > 0 and not na(trail)
+        ns = close - atr * trail_mult
+        if ns > trail
+            trail := ns
+            strategy.exit("LONG_X", from_entry="LONG", stop=trail)
+    if strategy.position_size < 0 and not na(trail)
+        ns = close + atr * trail_mult
+        if ns < trail
+            trail := ns
+            strategy.exit("SHORT_X", from_entry="SHORT", stop=trail)
+
+if strategy.position_size == 0
+    trail  := na
+    be_act := false
+
+// ─── GRAFICA ───────────────────────────────────────────────────
+plotshape(bar_index == sig_buy_bar,  title="BUY",  style=shape.labelup,   location=location.belowbar, color=color.lime, textcolor=color.black, size=size.small, text="BUY")
+plotshape(bar_index == sig_sell_bar, title="SELL", style=shape.labeldown, location=location.abovebar, color=color.red,  textcolor=color.white, size=size.small, text="SELL")
+plotshape(bos_up,   title="BOS up",   style=shape.triangleup,   location=location.belowbar, color=color.new(color.aqua,40),   size=size.tiny)
+plotshape(bos_down, title="BOS down", style=shape.triangledown, location=location.abovebar, color=color.new(color.fuchsia,40),size=size.tiny)
+
+// ─── PANNELLO STATO ────────────────────────────────────────────
+var table p = table.new(position.middle_left, 2, 5, bgcolor=color.new(color.black,70), border_width=1, border_color=color.new(color.blue,60))
+if barstate.islast
+    table.cell(p, 0, 0, "OB Pro", text_color=color.aqua, text_size=size.small, bgcolor=color.new(color.black,50))
+    table.cell(p, 1, 0, syminfo.ticker, text_color=color.silver, text_size=size.tiny, bgcolor=color.new(color.black,50))
+    table.cell(p, 0, 1, "Bias", text_color=color.gray, text_size=size.tiny)
+    table.cell(p, 1, 1, htf_bull and not htf_bear ? "RIALZO ▲" : htf_bear and not htf_bull ? "RIBASSO ▼" : "off/neutro", text_color=htf_bull and not htf_bear ? color.lime : htf_bear and not htf_bull ? color.red : color.gray, text_size=size.tiny)
+    table.cell(p, 0, 2, "OB attivo", text_color=color.gray, text_size=size.tiny)
+    table.cell(p, 1, 2, bull_on ? "BULL ▲" : bear_on ? "BEAR ▼" : "nessuno", text_color=bull_on ? color.lime : bear_on ? color.red : color.gray, text_size=size.tiny)
+    table.cell(p, 0, 3, "ADX", text_color=color.gray, text_size=size.tiny)
+    table.cell(p, 1, 3, str.tostring(math.round(adx,1)), text_color=adx_ok ? color.lime : color.orange, text_size=size.tiny)
+    table.cell(p, 0, 4, "Posizione", text_color=color.gray, text_size=size.tiny)
+    ptag = be_act ? " TRAIL" : ""
+    table.cell(p, 1, 4, strategy.position_size > 0 ? "LONG 🟢" + ptag : strategy.position_size < 0 ? "SHORT 🔴" + ptag : "FLAT ⚪", text_color=strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.white, text_size=size.tiny)
+
+// ─── TABELLA STATISTICHE BACKTEST ──────────────────────────────
+var table stats = table.new(position.top_right, 2, 11, bgcolor=color.new(color.black,70), border_width=1, border_color=color.new(color.blue,60))
+if barstate.islast
+    closed     = strategy.closedtrades
+    wins       = strategy.wintrades
+    losses     = strategy.losstrades
+    win_rate   = closed > 0 ? wins / closed * 100 : 0.0
+    gross_prof = strategy.grossprofit
+    gross_loss = strategy.grossloss
+    prof_fact  = gross_loss > 0 ? gross_prof / gross_loss : na
+    net_prof   = strategy.netprofit
+    net_pct    = strategy.initial_capital > 0 ? net_prof / strategy.initial_capital * 100 : 0.0
+    max_dd     = strategy.max_drawdown
+    max_dd_pct = strategy.initial_capital > 0 ? max_dd / strategy.initial_capital * 100 : 0.0
+    avg_trade  = closed > 0 ? net_prof / closed : 0.0
+    avg_win    = wins   > 0 ? gross_prof / wins   : 0.0
+    avg_loss   = losses > 0 ? gross_loss / losses : 0.0
+    rr_ratio   = avg_loss > 0 ? avg_win / avg_loss : na
+    grade = closed < 10 ? "⚪ POCHI DATI" : prof_fact >= 2.0 and win_rate >= 45 ? "🟢 OTTIMA" : prof_fact >= 1.5 ? "🟡 BUONA" : prof_fact >= 1.0 ? "🟠 OK" : "🔴 PERDENTE"
+    grade_color = closed < 10 ? color.gray : prof_fact >= 1.5 ? color.lime : prof_fact >= 1.0 ? color.yellow : color.red
+    table.cell(stats, 0, 0,  "📊 BACKTEST",  text_color=color.aqua, text_size=size.small, bgcolor=color.new(color.black,50))
+    table.cell(stats, 1, 0,  syminfo.ticker,  text_color=color.silver, text_size=size.tiny,  bgcolor=color.new(color.black,50))
+    table.cell(stats, 0, 1,  "Giudizio",     text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 1, 1,  grade,          text_color=grade_color, text_size=size.tiny)
+    table.cell(stats, 0, 2,  "Net Profit",   text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 1, 2,  "$" + str.tostring(math.round(net_prof,2)) + " (" + str.tostring(math.round(net_pct,2)) + "%)", text_color=net_prof >= 0 ? color.lime : color.red, text_size=size.tiny)
+    table.cell(stats, 0, 3,  "Trade Totali", text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 1, 3,  str.tostring(closed) + " (W:" + str.tostring(wins) + " L:" + str.tostring(losses) + ")", text_color=color.white, text_size=size.tiny)
+    table.cell(stats, 0, 4,  "Win Rate",     text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 1, 4,  str.tostring(math.round(win_rate,1)) + "%", text_color=win_rate >= 45 ? color.lime : win_rate >= 35 ? color.yellow : color.red, text_size=size.tiny)
+    table.cell(stats, 0, 5,  "Profit Factor",text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 1, 5,  na(prof_fact) ? "─" : str.tostring(math.round(prof_fact,2)), text_color=na(prof_fact) ? color.gray : prof_fact >= 1.5 ? color.lime : prof_fact >= 1.0 ? color.yellow : color.red, text_size=size.tiny)
+    table.cell(stats, 0, 6,  "Max Drawdown", text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 1, 6,  "$" + str.tostring(math.round(max_dd,2)) + " (" + str.tostring(math.round(max_dd_pct,2)) + "%)", text_color=max_dd_pct < 15 ? color.lime : max_dd_pct < 30 ? color.yellow : color.red, text_size=size.tiny)
+    table.cell(stats, 0, 7,  "Avg Trade",    text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 1, 7,  "$" + str.tostring(math.round(avg_trade,2)), text_color=avg_trade >= 0 ? color.lime : color.red, text_size=size.tiny)
+    table.cell(stats, 0, 8,  "Avg Win/Loss", text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 1, 8,  "$" + str.tostring(math.round(avg_win,1)) + " / $" + str.tostring(math.round(avg_loss,1)), text_color=color.silver, text_size=size.tiny)
+    table.cell(stats, 0, 9,  "R/R Ratio",    text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 1, 9,  na(rr_ratio) ? "─" : str.tostring(math.round(rr_ratio,2)) + ":1", text_color=na(rr_ratio) ? color.gray : rr_ratio >= 1.5 ? color.lime : color.yellow, text_size=size.tiny)
+    table.cell(stats, 0, 10, "Regola", text_color=color.gray, text_size=size.tiny)
+    table.cell(stats, 1, 10, "50+ trade = affidabile", text_color=color.gray, text_size=size.tiny)
