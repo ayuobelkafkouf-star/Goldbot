@@ -1,14 +1,16 @@
 //@version=5
 // ╔══════════════════════════════════════════════════════════════╗
-// ║  OrderBlock Pro — Smart Money / Order Block strategy          ║
+// ║  OrderBlock Pro v2 — Smart Money / Order Block strategy       ║
 // ║  Universale: ORO (XAUUSD) e BITCOIN (BTCUSD).                  ║
-// ║  Logica: rilevo una rottura di struttura (BOS), segno         ║
-// ║  l'ULTIMA candela contraria prima del movimento (= order      ║
-// ║  block). Quando il prezzo RIENTRA nella zona, entro nel        ║
-// ║  verso del trend. SL oltre l'OB, TP1 parziale + trailing.      ║
-// ║  Consigliato su H1 / M15.                                      ║
+// ║  Logica: rilevo una rottura di struttura (BOS) con impulso    ║
+// ║  forte (displacement), segno l'ULTIMA candela contraria       ║
+// ║  prima del movimento (= order block). Quando il prezzo        ║
+// ║  RIENTRA nella zona, entro con ORDINE LIMITE sul bordo        ║
+// ║  (o al 50%) nel verso del trend. SL oltre l'OB,               ║
+// ║  TP1 parziale a 1R + break-even + trailing.                   ║
+// ║  Ottimizzato per M5 (kill zones London/NY). Ok anche M15/H1.  ║
 // ╚══════════════════════════════════════════════════════════════╝
-strategy("OrderBlock Pro", shorttitle="OB Pro", overlay=true,
+strategy("OrderBlock Pro v2", shorttitle="OB Pro", overlay=true,
   default_qty_type=strategy.percent_of_equity, default_qty_value=10,
   commission_type=strategy.commission.percent, commission_value=0.02,
   slippage=2, process_orders_on_close=true,
@@ -18,12 +20,21 @@ strategy("OrderBlock Pro", shorttitle="OB Pro", overlay=true,
 pivot_len   = input.int(5,  "Sensibilità struttura (pivot)", group="Order Block", minval=2, maxval=30, tooltip="Più basso = rileva swing piccoli (più segnali). Più alto = solo strutture importanti.")
 ob_lookback = input.int(15, "Ricerca candela OB (barre)",    group="Order Block", minval=3, maxval=50, tooltip="Quante barre indietro cercare l'ultima candela contraria prima della rottura.")
 ob_zone     = input.string("Completa (mecha+stoppino)", "Zona dell'order block", options=["Completa (mecha+stoppino)", "Solo corpo (open-close)"], group="Order Block", tooltip="Completa = high/low della candela (zona ampia, SL più largo). Solo corpo = open/close (zona stretta, SL più vicino).")
-one_touch   = input.bool(true, "Entra al primo tocco della zona", group="Order Block", tooltip="ON = entra appena il prezzo rientra nell'OB. OFF = aspetta candela di conferma dentro la zona.")
+one_touch   = input.bool(true, "Entra al primo tocco della zona", group="Order Block", tooltip="Solo per modalità 'Mercato al tocco'. ON = entra appena il prezzo rientra nell'OB. OFF = aspetta candela di conferma dentro la zona.")
 require_pullback = input.bool(true, "Aspetta il ritorno nella zona (no chasing)", group="Order Block", tooltip="ON (consigliato) = entra SOLO dopo che il prezzo si è allontanato dall'OB e ci RIENTRA (vendi/compra il pullback, non insegui la candela di rottura). OFF = entra anche sulla candela d'impulso che attraversa la zona (ingressi in ritardo/inseguiti).")
+ob_expiry = input.int(60, "Validità OB (barre max)", group="Order Block", minval=5, maxval=300, tooltip="Se il prezzo non rientra entro queste barre, l'order block scade.")
+
+// ─── PRECISIONE (consigliato per M5) ───────────────────────────
+entry_mode = input.string("Limite sul bordo zona", "Modalità di ingresso", options=["Mercato al tocco", "Limite sul bordo zona", "Limite al 50% zona (più preciso)"], group="Precisione (M5)", tooltip="Limite sul bordo = ordine pendente ESATTAMENTE sul bordo dell'OB: entri al prezzo della zona, non alla chiusura della candela. Limite al 50% = entra a metà zona (prezzo migliore, SL più stretto, ma alcuni trade scappano senza di te). Mercato al tocco = vecchio comportamento.")
+use_disp   = input.bool(true, "Filtro impulso forte (displacement)", group="Precisione (M5)", tooltip="Accetta SOLO order block creati da una candela di rottura con corpo grande (vero movimento istituzionale). Filtra il rumore: meno trade, più qualità.")
+disp_mult  = input.float(1.0, "Forza minima impulso (x ATR)", group="Precisione (M5)", minval=0.3, maxval=3.0, step=0.1)
+use_sess   = input.bool(true, "Solo kill zones London + New York", group="Precisione (M5)", tooltip="Su M5 evita la sessione asiatica (poca liquidità = falsi segnali). Gli orari sono in GMT.")
+sess_ldn   = input.session("0700-1100", "Kill zone London (GMT)", group="Precisione (M5)")
+sess_ny    = input.session("1330-1700", "Kill zone New York (GMT)", group="Precisione (M5)")
 
 // ─── BIAS / FILTRI ─────────────────────────────────────────────
 use_htf  = input.bool(true, "Filtro trend superiore", group="Filtri", tooltip="Prende SOLO order block nel verso del trend del timeframe alto.")
-htf      = input.timeframe("240", "Timeframe del bias", group="Filtri")
+htf      = input.timeframe("60", "Timeframe del bias", group="Filtri", tooltip="Per M5 usa 60 (H1). Per M15/H1 usa 240 (H4).")
 htf_fast = input.int(21, "Bias EMA veloce", group="Filtri", minval=5, maxval=100)
 htf_slow = input.int(55, "Bias EMA lenta",  group="Filtri", minval=10, maxval=200)
 use_adx       = input.bool(true, "Filtro ADX (no laterale)", group="Filtri")
@@ -32,13 +43,10 @@ adx_threshold = input.float(20.0, "Soglia ADX minima", group="Filtri", minval=10
 // ─── RISCHIO / USCITE ──────────────────────────────────────────
 risk_pct   = input.float(0.75, "Rischio % per trade", group="Rischio", minval=0.1, maxval=5.0, step=0.05)
 sl_buf     = input.float(0.3, "SL buffer ATR (oltre l'OB)", group="Rischio", minval=0.0, maxval=3.0, step=0.1)
-tp1_r      = input.float(1.5, "TP1 in multipli di rischio (R)", group="Rischio", minval=0.3, maxval=10.0, step=0.1)
-tp1_pct    = input.float(50,  "% chiusura a TP1", group="Rischio", minval=10, maxval=90, tooltip="Banca questa parte a TP1, il resto cavalca col trailing.")
+tp1_r      = input.float(1.0, "TP1 in multipli di rischio (R)", group="Rischio", minval=0.3, maxval=10.0, step=0.1, tooltip="TP1 a 1R = target vicino, colpito spesso: alza il win rate. Il resto della posizione corre col trailing per i movimenti grandi.")
+tp1_pct    = input.float(60,  "% chiusura a TP1", group="Rischio", minval=10, maxval=90, tooltip="Banca questa parte a TP1, il resto cavalca col trailing.")
 use_be     = input.bool(true, "Break-even dopo TP1", group="Rischio")
 trail_mult = input.float(2.5, "Trailing ATR mult (runner)", group="Rischio", minval=0.5, maxval=10.0, step=0.25)
-
-// ─── SCADENZA OB ───────────────────────────────────────────────
-ob_expiry = input.int(60, "Validità OB (barre max)", group="Order Block", minval=5, maxval=300, tooltip="Se il prezzo non rientra entro queste barre, l'order block scade.")
 
 show_boxes = input.bool(true, "Disegna le zone Order Block", group="Grafica")
 
@@ -46,6 +54,10 @@ show_boxes = input.bool(true, "Disegna le zone Order Block", group="Grafica")
 atr = ta.atr(14)
 [_dip, _dim, adx] = ta.dmi(14, 14)
 adx_ok = not use_adx or adx >= adx_threshold
+
+in_ldn  = not na(time(timeframe.period, sess_ldn, "GMT"))
+in_ny   = not na(time(timeframe.period, sess_ny,  "GMT"))
+sess_ok = not use_sess or in_ldn or in_ny
 
 [htfF, htfS] = request.security(syminfo.tickerid, htf, [ta.ema(close, htf_fast)[1], ta.ema(close, htf_slow)[1]], lookahead=barmerge.lookahead_off)
 htf_bull = not use_htf or htfF > htfS
@@ -61,9 +73,10 @@ if not na(ph)
 if not na(pl)
     last_pl := pl
 
-// Rottura di struttura
-bos_up   = not na(last_ph) and close > last_ph and close[1] <= last_ph
-bos_down = not na(last_pl) and close < last_pl and close[1] >= last_pl
+// Rottura di struttura (con filtro displacement: corpo candela forte)
+disp_ok  = not use_disp or math.abs(close - open) >= disp_mult * atr
+bos_up   = not na(last_ph) and close > last_ph and close[1] <= last_ph and disp_ok
+bos_down = not na(last_pl) and close < last_pl and close[1] >= last_pl and disp_ok
 
 // ─── ORDER BLOCK RIALZISTA (su BOS up = ultima candela ribassista) ─
 var float bull_top = na
@@ -129,6 +142,9 @@ if bear_on and not bear_armed and high < bear_bot
     bear_armed := true
 
 // ─── CONDIZIONI DI INGRESSO (rientro nella zona) ───────────────
+is_market = entry_mode == "Mercato al tocco"
+half_zone = entry_mode == "Limite al 50% zona (più preciso)"
+
 touch_bull = bull_on and low  <= bull_top and high >= bull_bot
 touch_bear = bear_on and high >= bear_bot and low  <= bear_top
 confirm_bull = one_touch or close > open
@@ -137,10 +153,14 @@ armed_bull = not require_pullback or bull_armed
 armed_bear = not require_pullback or bear_armed
 
 flat = strategy.position_size == 0
-buy_signal  = bull_on and armed_bull and touch_bull and confirm_bull and htf_bull and adx_ok and flat
-sell_signal = bear_on and armed_bear and touch_bear and confirm_bear and htf_bear and adx_ok and flat
+buy_signal  = is_market and bull_on and armed_bull and touch_bull and confirm_bull and htf_bull and adx_ok and sess_ok and flat
+sell_signal = is_market and bear_on and armed_bear and touch_bear and confirm_bear and htf_bear and adx_ok and sess_ok and flat
 
-// ─── SL / TP ───────────────────────────────────────────────────
+// Prezzi di ingresso per gli ordini limite (bordo prossimale o 50%)
+bull_e = half_zone ? (bull_top + bull_bot) / 2 : bull_top
+bear_e = half_zone ? (bear_top + bear_bot) / 2 : bear_bot
+
+// ─── SL / TP (modalità mercato) ────────────────────────────────
 sl_buy  = bull_bot - atr * sl_buf
 sl_sell = bear_top + atr * sl_buf
 risk_buy  = close - sl_buy
@@ -152,14 +172,19 @@ f_qty(_d) =>
     rc = strategy.equity * (risk_pct / 100.0)
     _d > 0 ? rc / _d : 0.0
 
-// ─── STATO POSIZIONE ───────────────────────────────────────────
+// ─── STATO POSIZIONE / ORDINI ──────────────────────────────────
 var float pos_sl  = na
 var float pos_tp1 = na
 var bool  be_act  = false
 var float trail   = na
 var int   sig_buy_bar  = 0
 var int   sig_sell_bar = 0
+var bool  bull_pending = false
+var bool  bear_pending = false
+var int   bull_ord_bar = -1
+var int   bear_ord_bar = -1
 
+// — Modalità MERCATO: entra alla chiusura della candela che tocca —
 if buy_signal and risk_buy > 0
     pos_sl  := sl_buy
     pos_tp1 := tp1_buy
@@ -179,6 +204,53 @@ if sell_signal and risk_sell > 0
     strategy.entry("SHORT", strategy.short, qty=f_qty(risk_sell))
     strategy.exit("SHORT_X", from_entry="SHORT", stop=pos_sl)
     alert("🔴 OB SELL\nEntry: " + str.tostring(close,"#.##") + "\nSL: " + str.tostring(pos_sl,"#.##") + "\nTP1: " + str.tostring(pos_tp1,"#.##"), alert.freq_once_per_bar_close)
+
+// — Modalità LIMITE: ordine pendente esattamente sulla zona OB —
+if not is_market and bull_on and armed_bull and not bull_pending and not bear_pending and flat and htf_bull and adx_ok and sess_ok
+    e_px = bull_e
+    s_px = bull_bot - atr * sl_buf
+    r_px = e_px - s_px
+    if r_px > 0
+        pos_sl  := s_px
+        pos_tp1 := e_px + tp1_r * r_px
+        be_act  := false
+        bull_pending := true
+        bull_ord_bar := bull_bar
+        strategy.entry("LONG", strategy.long, qty=f_qty(r_px), limit=e_px)
+        strategy.exit("LONG_X", from_entry="LONG", stop=pos_sl)
+        alert("🟢 OB BUY LIMIT piazzato\nEntry: " + str.tostring(e_px,"#.##") + "\nSL: " + str.tostring(pos_sl,"#.##") + "\nTP1: " + str.tostring(pos_tp1,"#.##"), alert.freq_once_per_bar_close)
+
+if not is_market and bear_on and armed_bear and not bear_pending and not bull_pending and flat and htf_bear and adx_ok and sess_ok
+    e_px = bear_e
+    s_px = bear_top + atr * sl_buf
+    r_px = s_px - e_px
+    if r_px > 0
+        pos_sl  := s_px
+        pos_tp1 := e_px - tp1_r * r_px
+        be_act  := false
+        bear_pending := true
+        bear_ord_bar := bear_bar
+        strategy.entry("SHORT", strategy.short, qty=f_qty(r_px), limit=e_px)
+        strategy.exit("SHORT_X", from_entry="SHORT", stop=pos_sl)
+        alert("🔴 OB SELL LIMIT piazzato\nEntry: " + str.tostring(e_px,"#.##") + "\nSL: " + str.tostring(pos_sl,"#.##") + "\nTP1: " + str.tostring(pos_tp1,"#.##"), alert.freq_once_per_bar_close)
+
+// — Ordine limite eseguito: la zona è consumata —
+if bull_pending and strategy.position_size > 0
+    bull_pending := false
+    bull_on := false
+    sig_buy_bar := bar_index
+if bear_pending and strategy.position_size < 0
+    bear_pending := false
+    bear_on := false
+    sig_sell_bar := bar_index
+
+// — Cancella l'ordine limite se l'OB scade, viene invalidato o sostituito —
+if bull_pending and flat and (not bull_on or bull_bar != bull_ord_bar or not armed_bull)
+    strategy.cancel("LONG")
+    bull_pending := false
+if bear_pending and flat and (not bear_on or bear_bar != bear_ord_bar or not armed_bear)
+    strategy.cancel("SHORT")
+    bear_pending := false
 
 // ─── TP1 PARZIALE + BE + TRAILING ──────────────────────────────
 if strategy.position_size > 0 and not be_act and not na(pos_tp1) and high >= pos_tp1
@@ -215,20 +287,22 @@ plotshape(bos_up,   title="BOS up",   style=shape.triangleup,   location=locatio
 plotshape(bos_down, title="BOS down", style=shape.triangledown, location=location.abovebar, color=color.new(color.fuchsia,40),size=size.tiny)
 
 // ─── PANNELLO STATO ────────────────────────────────────────────
-var table p = table.new(position.middle_left, 2, 5, bgcolor=color.new(color.black,70), border_width=1, border_color=color.new(color.blue,60))
+var table p = table.new(position.middle_left, 2, 6, bgcolor=color.new(color.black,70), border_width=1, border_color=color.new(color.blue,60))
 if barstate.islast
-    table.cell(p, 0, 0, "OB Pro", text_color=color.aqua, text_size=size.small, bgcolor=color.new(color.black,50))
+    table.cell(p, 0, 0, "OB Pro v2", text_color=color.aqua, text_size=size.small, bgcolor=color.new(color.black,50))
     table.cell(p, 1, 0, syminfo.ticker, text_color=color.silver, text_size=size.tiny, bgcolor=color.new(color.black,50))
     table.cell(p, 0, 1, "Bias", text_color=color.gray, text_size=size.tiny)
     table.cell(p, 1, 1, htf_bull and not htf_bear ? "RIALZO ▲" : htf_bear and not htf_bull ? "RIBASSO ▼" : "off/neutro", text_color=htf_bull and not htf_bear ? color.lime : htf_bear and not htf_bull ? color.red : color.gray, text_size=size.tiny)
     table.cell(p, 0, 2, "OB attivo", text_color=color.gray, text_size=size.tiny)
-    ob_tag = bull_on ? (bull_armed ? " ✅" : " ⏳") : bear_on ? (bear_armed ? " ✅" : " ⏳") : ""
+    ob_tag = bull_on ? (bull_pending ? " 📌" : bull_armed ? " ✅" : " ⏳") : bear_on ? (bear_pending ? " 📌" : bear_armed ? " ✅" : " ⏳") : ""
     table.cell(p, 1, 2, (bull_on ? "BULL ▲" : bear_on ? "BEAR ▼" : "nessuno") + ob_tag, text_color=bull_on ? color.lime : bear_on ? color.red : color.gray, text_size=size.tiny)
-    table.cell(p, 0, 3, "ADX", text_color=color.gray, text_size=size.tiny)
-    table.cell(p, 1, 3, str.tostring(math.round(adx,1)), text_color=adx_ok ? color.lime : color.orange, text_size=size.tiny)
-    table.cell(p, 0, 4, "Posizione", text_color=color.gray, text_size=size.tiny)
+    table.cell(p, 0, 3, "Sessione", text_color=color.gray, text_size=size.tiny)
+    table.cell(p, 1, 3, not use_sess ? "sempre ON" : in_ldn ? "LONDON 🇬🇧" : in_ny ? "NEW YORK 🇺🇸" : "fuori orario", text_color=sess_ok ? color.lime : color.orange, text_size=size.tiny)
+    table.cell(p, 0, 4, "ADX", text_color=color.gray, text_size=size.tiny)
+    table.cell(p, 1, 4, str.tostring(math.round(adx,1)), text_color=adx_ok ? color.lime : color.orange, text_size=size.tiny)
+    table.cell(p, 0, 5, "Posizione", text_color=color.gray, text_size=size.tiny)
     ptag = be_act ? " TRAIL" : ""
-    table.cell(p, 1, 4, strategy.position_size > 0 ? "LONG 🟢" + ptag : strategy.position_size < 0 ? "SHORT 🔴" + ptag : "FLAT ⚪", text_color=strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.white, text_size=size.tiny)
+    table.cell(p, 1, 5, strategy.position_size > 0 ? "LONG 🟢" + ptag : strategy.position_size < 0 ? "SHORT 🔴" + ptag : bull_pending or bear_pending ? "ORDINE 📌" : "FLAT ⚪", text_color=strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.white, text_size=size.tiny)
 
 // ─── TABELLA STATISTICHE BACKTEST ──────────────────────────────
 var table stats = table.new(position.top_right, 2, 11, bgcolor=color.new(color.black,70), border_width=1, border_color=color.new(color.blue,60))
@@ -248,7 +322,7 @@ if barstate.islast
     avg_win    = wins   > 0 ? gross_prof / wins   : 0.0
     avg_loss   = losses > 0 ? gross_loss / losses : 0.0
     rr_ratio   = avg_loss > 0 ? avg_win / avg_loss : na
-    grade = closed < 10 ? "⚪ POCHI DATI" : prof_fact >= 2.0 and win_rate >= 45 ? "🟢 OTTIMA" : prof_fact >= 1.5 ? "🟡 BUONA" : prof_fact >= 1.0 ? "🟠 OK" : "🔴 PERDENTE"
+    grade = closed < 10 ? "⚪ POCHI DATI" : prof_fact >= 2.0 and win_rate >= 60 ? "🟢 OTTIMA" : prof_fact >= 1.5 and win_rate >= 50 ? "🟡 BUONA" : prof_fact >= 1.0 ? "🟠 OK" : "🔴 PERDENTE"
     grade_color = closed < 10 ? color.gray : prof_fact >= 1.5 ? color.lime : prof_fact >= 1.0 ? color.yellow : color.red
     table.cell(stats, 0, 0,  "📊 BACKTEST",  text_color=color.aqua, text_size=size.small, bgcolor=color.new(color.black,50))
     table.cell(stats, 1, 0,  syminfo.ticker,  text_color=color.silver, text_size=size.tiny,  bgcolor=color.new(color.black,50))
@@ -259,7 +333,7 @@ if barstate.islast
     table.cell(stats, 0, 3,  "Trade Totali", text_color=color.gray, text_size=size.tiny)
     table.cell(stats, 1, 3,  str.tostring(closed) + " (W:" + str.tostring(wins) + " L:" + str.tostring(losses) + ")", text_color=color.white, text_size=size.tiny)
     table.cell(stats, 0, 4,  "Win Rate",     text_color=color.gray, text_size=size.tiny)
-    table.cell(stats, 1, 4,  str.tostring(math.round(win_rate,1)) + "%", text_color=win_rate >= 45 ? color.lime : win_rate >= 35 ? color.yellow : color.red, text_size=size.tiny)
+    table.cell(stats, 1, 4,  str.tostring(math.round(win_rate,1)) + "%", text_color=win_rate >= 60 ? color.lime : win_rate >= 45 ? color.yellow : color.red, text_size=size.tiny)
     table.cell(stats, 0, 5,  "Profit Factor",text_color=color.gray, text_size=size.tiny)
     table.cell(stats, 1, 5,  na(prof_fact) ? "─" : str.tostring(math.round(prof_fact,2)), text_color=na(prof_fact) ? color.gray : prof_fact >= 1.5 ? color.lime : prof_fact >= 1.0 ? color.yellow : color.red, text_size=size.tiny)
     table.cell(stats, 0, 6,  "Max Drawdown", text_color=color.gray, text_size=size.tiny)
