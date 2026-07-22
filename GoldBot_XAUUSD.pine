@@ -1,5 +1,5 @@
 //@version=5
-strategy("GoldBot XAUUSD v5.2", shorttitle="GoldBot v5.2", overlay=true,
+strategy("GoldBot XAUUSD ICT", shorttitle="GoldBot ICT", overlay=true,
   default_qty_type=strategy.percent_of_equity, default_qty_value=10,
   commission_type=strategy.commission.cash_per_contract, commission_value=0.35,
   slippage=5, margin_long=100, margin_short=100,
@@ -9,31 +9,12 @@ strategy("GoldBot XAUUSD v5.2", shorttitle="GoldBot v5.2", overlay=true,
 mode = input.string("Conservativo", "Modalità operativa",
    options=["Conservativo", "Sessione Estesa", "Aggressivo"],
    group="Modalità",
-   tooltip="Conservativo: solo overlap 13-17, score 60, max 5 trade/g. Sessione Estesa: 8-20, score MIN 70 (qualità protetta), max 5 trade/g. Aggressivo: 8-20, score 60, max 10 trade/g, cooldown 2.")
-min_score       = input.int(60, "Score minimo per trade", group="Modalità", minval=0, maxval=100, tooltip="Soglia base. In Sessione Estesa diventa min 70 automaticamente.")
-max_zones       = input.int(5, "Zone attive max per lato", group="Modalità", minval=1, maxval=10)
+   tooltip="Conservativo: solo overlap 13-17, max 5 trade/g. Sessione Estesa: 8-20, max 5 trade/g. Aggressivo: 8-20, max 10 trade/g, cooldown 2.")
 
-h1_fast  = input.int(21, "H1 EMA veloce", group="Trend H1")
-h1_slow  = input.int(55, "H1 EMA lenta",  group="Trend H1")
-m15_fast = input.int(21, "M15 EMA veloce", group="Trend M15")
-m15_slow = input.int(55, "M15 EMA lenta",  group="Trend M15")
-rsi_len  = input.int(14, "RSI periodo", group="RSI")
-rsi_ob   = input.int(65, "RSI Ipercomprato", group="RSI")
-rsi_os   = input.int(35, "RSI Ipervenduto",  group="RSI")
-
-pivot_left  = input.int(5, "Pivot left bars",  group="Zone", minval=2, maxval=15)
-pivot_right = input.int(3, "Pivot right bars", group="Zone", minval=2, maxval=10)
-zone_width  = input.float(1.5, "Larghezza zona ATR", group="Zone", minval=0.5, maxval=5.0)
-zone_tol    = input.float(0.5, "Tolleranza retest ATR", group="Zone", minval=0.1, maxval=2.0)
-
-spike_mult  = input.float(0.5, "Spike minimo ATR", group="Spike", minval=0.1, maxval=2.0)
-body_mult   = input.float(0.3, "Body conferma minimo ATR", group="Spike", minval=0.1, maxval=1.0)
-
-use_liquidity  = input.bool(true, "Abilita sweep liquidità + CiSD", group="ICT / Liquidità", tooltip="Riconosce quando il prezzo spazza la liquidità (massimo/minimo recente) e poi rigetta dall'altra parte con corpo direzionale = Change in State of Delivery.")
-liq_lookback   = input.int(20, "Barre lookback pool liquidità", group="ICT / Liquidità", minval=5, maxval=100)
-liq_buffer_atr = input.float(0.1, "Buffer sweep oltre livello (ATR)", group="ICT / Liquidità", minval=0.0, maxval=1.0, step=0.05)
-liq_require    = input.bool(false, "Richiedi sweep per entrare (hard-gate)", group="ICT / Liquidità")
-liq_score      = input.int(20, "Bonus score sweep+CiSD", group="ICT / Liquidità", minval=0, maxval=50)
+// ─── ICT: LIQUIDITY SWEEP + CiSD ──────────────────────────
+liq_lookback   = input.int(20, "Barre lookback pool liquidità", group="ICT: Liquidity Sweep + CiSD", minval=5, maxval=100)
+liq_buffer_atr = input.float(0.1, "Buffer sweep oltre livello (ATR)", group="ICT: Liquidity Sweep + CiSD", minval=0.0, maxval=1.0, step=0.05)
+cisd_body_mult = input.float(0.3, "Displacement: corpo minimo CiSD (ATR)", group="ICT: Liquidity Sweep + CiSD", minval=0.0, maxval=2.0, step=0.05, tooltip="Il bar che rigetta deve avere un corpo direzionale (displacement) di almeno questa frazione di ATR = Change in State of Delivery.")
 
 risk_pct    = input.float(0.5, "Rischio % per trade", group="Rischio", minval=0.1, maxval=3.0, step=0.1)
 sl_atr_mult = input.float(0.4, "SL buffer ATR", group="Rischio", minval=0.1, maxval=2.0, step=0.1)
@@ -76,18 +57,11 @@ news_after   = input.int(30, "Minuti dopo",  group="Notizie")
 // Usiamo [1] sui valori HTF + lookahead_off per evitare il repainting in live.
 f_sec(_tf, _src) => request.security(syminfo.tickerid, _tf, _src[1], lookahead=barmerge.lookahead_off)
 
-h1_ef  = f_sec("60", ta.ema(close, h1_fast))
-h1_es  = f_sec("60", ta.ema(close, h1_slow))
-m15_ef = f_sec("15", ta.ema(close, m15_fast))
-m15_es = f_sec("15", ta.ema(close, m15_slow))
-m15_rsi    = f_sec("15", ta.rsi(close, rsi_len))
 m15_high   = f_sec("15", high)
 m15_low    = f_sec("15", low)
 m15_close  = f_sec("15", close)
 m15_open   = f_sec("15", open)
 m15_atr    = f_sec("15", ta.atr(14))
-m15_ph     = f_sec("15", ta.pivothigh(high, pivot_left, pivot_right))
-m15_pl     = f_sec("15", ta.pivotlow (low,  pivot_left, pivot_right))
 m15_struct_high = f_sec("15", ta.highest(high, 20))
 m15_struct_low  = f_sec("15", ta.lowest (low,  20))
 h1_struct_high  = f_sec("60", ta.highest(high, 20))
@@ -97,124 +71,25 @@ bsl_level  = f_sec("15", ta.highest(high, liq_lookback)[1])
 ssl_level  = f_sec("15", ta.lowest (low,  liq_lookback)[1])
 atr_val    = ta.atr(14)
 
-// ─── TREND ────────────────────────────────────────────────
-h1_bull  = h1_ef > h1_es
-h1_bear  = h1_ef < h1_es
-m15_bull = m15_ef > m15_es
-m15_bear = m15_ef < m15_es
-
 // ─── MODALITÀ EFFETTIVA ───────────────────────────────────
-// 3 modalità: Conservativo (overlap 13-17), Sessione Estesa (8-20 con score floor 70), Aggressivo (8-20 + meno cooldown).
 is_conservative = mode == "Conservativo"
 is_extended     = mode == "Sessione Estesa"
 is_aggressive   = mode == "Aggressivo"
 
-eff_use_session   = is_conservative  // solo conservativo usa overlap stretto
-eff_force_hours   = is_extended or is_aggressive  // estesa/aggressiva usano fascia 8-20
+eff_use_session   = is_conservative              // solo conservativo usa overlap stretto
+eff_force_hours   = is_extended or is_aggressive // estesa/aggressiva usano fascia 8-20
 eff_cooldown_bars = is_aggressive ? 2  : cooldown_bars
 eff_max_trades    = is_aggressive ? 10 : max_trades_day
-eff_zone_tol      = is_aggressive ? 0.7 : zone_tol
-eff_min_score     = is_extended ? math.max(min_score, 70) : min_score
-
-// ─── MULTI-ZONE SUPPLY/DEMAND ─────────────────────────────
-// Manteniamo array delle ultime N zone supply e demand. Una zona si invalida
-// quando il prezzo la attraversa con forza (chiusura > top per supply, < bot per demand).
-var array<float> sup_tops  = array.new<float>()
-var array<float> sup_bots  = array.new<float>()
-var array<box>   sup_boxes = array.new<box>()
-var array<float> dem_tops  = array.new<float>()
-var array<float> dem_bots  = array.new<float>()
-var array<box>   dem_boxes = array.new<box>()
-
-// Push nuova supply quando arriva un pivot high
-if not na(m15_ph)
-    s_top = m15_ph
-    s_bot = m15_ph - m15_atr * zone_width
-    nb = box.new(bar_index, s_top, bar_index + 10, s_bot, bgcolor=color.new(color.red, 85), border_color=color.new(color.red, 50), border_width=1)
-    array.push(sup_tops, s_top)
-    array.push(sup_bots, s_bot)
-    array.push(sup_boxes, nb)
-    if array.size(sup_tops) > max_zones
-        box.delete(array.shift(sup_boxes))
-        array.shift(sup_tops)
-        array.shift(sup_bots)
-
-// Push nuova demand quando arriva un pivot low
-if not na(m15_pl)
-    d_bot = m15_pl
-    d_top = m15_pl + m15_atr * zone_width
-    nb = box.new(bar_index, d_top, bar_index + 10, d_bot, bgcolor=color.new(color.green, 85), border_color=color.new(color.green, 50), border_width=1)
-    array.push(dem_tops, d_top)
-    array.push(dem_bots, d_bot)
-    array.push(dem_boxes, nb)
-    if array.size(dem_tops) > max_zones
-        box.delete(array.shift(dem_boxes))
-        array.shift(dem_tops)
-        array.shift(dem_bots)
-
-// Invalida zone rotte (iterando dalla fine per remove safe)
-i_s = array.size(sup_tops) - 1
-while i_s >= 0
-    if m15_close > array.get(sup_tops, i_s) + m15_atr * 0.5
-        box.delete(array.get(sup_boxes, i_s))
-        array.remove(sup_tops, i_s)
-        array.remove(sup_bots, i_s)
-        array.remove(sup_boxes, i_s)
-    i_s := i_s - 1
-
-i_d = array.size(dem_tops) - 1
-while i_d >= 0
-    if m15_close < array.get(dem_bots, i_d) - m15_atr * 0.5
-        box.delete(array.get(dem_boxes, i_d))
-        array.remove(dem_tops, i_d)
-        array.remove(dem_bots, i_d)
-        array.remove(dem_boxes, i_d)
-    i_d := i_d - 1
-
-// Estendi a destra le box attive
-if array.size(sup_boxes) > 0
-    for i = 0 to array.size(sup_boxes) - 1
-        box.set_right(array.get(sup_boxes, i), bar_index + 5)
-if array.size(dem_boxes) > 0
-    for i = 0 to array.size(dem_boxes) - 1
-        box.set_right(array.get(dem_boxes, i), bar_index + 5)
-
-// Verifica se il prezzo sta retestando una qualsiasi zona attiva
-price_at_supply = false
-if array.size(sup_tops) > 0
-    for i = 0 to array.size(sup_tops) - 1
-        s_t = array.get(sup_tops, i)
-        s_b = array.get(sup_bots, i)
-        if m15_high >= s_b - m15_atr * eff_zone_tol and m15_high <= s_t + m15_atr * eff_zone_tol
-            price_at_supply := true
-
-price_at_demand = false
-if array.size(dem_tops) > 0
-    for i = 0 to array.size(dem_tops) - 1
-        d_t = array.get(dem_tops, i)
-        d_b = array.get(dem_bots, i)
-        if m15_low <= d_t + m15_atr * eff_zone_tol and m15_low >= d_b - m15_atr * eff_zone_tol
-            price_at_demand := true
-
-sup_count = array.size(sup_tops)
-dem_count = array.size(dem_tops)
-
-// ─── SPIKE + CONFERMA ─────────────────────────────────────
-spike_up   = (m15_high - m15_low) >= m15_atr * spike_mult and m15_high > m15_high[1]
-spike_down = (m15_high - m15_low) >= m15_atr * spike_mult and m15_low  < m15_low[1]
-
-body_sell = m15_open - m15_close
-body_buy  = m15_close - m15_open
-
-confirm_sell = spike_up   and m15_close < m15_open and body_sell >= m15_atr * body_mult
-confirm_buy  = spike_down and m15_close > m15_open and body_buy  >= m15_atr * body_mult
 
 // ─── LIQUIDITY SWEEP + CiSD ───────────────────────────────
-// Sweep: il bar wicka OLTRE il pool (buy-side/sell-side) ma richiude
-// dall'altra parte con corpo direzionale = Change in State of Delivery.
-liq_buf = m15_atr * liq_buffer_atr
-liq_sweep_sell = use_liquidity and m15_high > bsl_level + liq_buf and m15_close < bsl_level and m15_close < m15_open
-liq_sweep_buy  = use_liquidity and m15_low  < ssl_level - liq_buf and m15_close > ssl_level and m15_close > m15_open
+// Buy-side liquidity = massimo recente (stop dei buy); sell-side = minimo recente.
+// Sweep+CiSD: il bar wicka OLTRE il pool ma richiude dall'altra parte con
+// corpo direzionale (displacement) = Change in State of Delivery.
+liq_buf   = m15_atr * liq_buffer_atr
+cisd_body = math.abs(m15_close - m15_open)
+displaced = cisd_body >= m15_atr * cisd_body_mult
+liq_sweep_sell = m15_high > bsl_level + liq_buf and m15_close < bsl_level and m15_close < m15_open and displaced
+liq_sweep_buy  = m15_low  < ssl_level - liq_buf and m15_close > ssl_level and m15_close > m15_open and displaced
 
 // ─── FILTRI ───────────────────────────────────────────────
 h_now       = hour(time, "Europe/Rome")
@@ -223,8 +98,6 @@ hours_ok    = h_now >= start_hour and h_now < end_hour
 // Conservativo → overlap; Estesa/Aggressiva → fascia 8-20 forzata; altrimenti rispetta use_hours.
 hour_ok     = eff_use_session ? session_ok : eff_force_hours ? hours_ok : (not use_hours or hours_ok)
 atr_ok      = not use_atr or atr_val >= atr_min
-rsi_ok_sell = m15_rsi > 45 and m15_rsi < rsi_ob
-rsi_ok_buy  = m15_rsi < 55 and m15_rsi > rsi_os
 
 current_hour = hour(time, "Europe/Rome")
 current_min  = minute(time, "Europe/Rome")
@@ -270,42 +143,10 @@ if use_circuit and dd_pct >= dd_threshold and day_counter >= pause_until_d
 circuit_ok = not use_circuit or day_counter >= pause_until_d
 pause_left = math.max(0, pause_until_d - day_counter)
 
-// ─── PROBABILITÀ SETUP ────────────────────────────────────
-score_sell = 0
-score_buy  = 0
-score_sell := h1_bear ? score_sell + 25 : score_sell
-score_buy  := h1_bull ? score_buy + 25 : score_buy
-score_sell := m15_bear ? score_sell + 20 : score_sell
-score_buy  := m15_bull ? score_buy + 20 : score_buy
-score_sell := price_at_supply ? score_sell + 20 : score_sell
-score_buy  := price_at_demand ? score_buy + 20 : score_buy
-score_sell := rsi_ok_sell ? score_sell + 15 : score_sell
-score_buy  := rsi_ok_buy ? score_buy + 15 : score_buy
-vol_high = volume > ta.sma(volume, 20) * 1.2
-score_sell := vol_high ? score_sell + 10 : score_sell
-score_buy  := vol_high ? score_buy + 10 : score_buy
-score_sell := atr_ok ? score_sell + 10 : score_sell
-score_buy  := atr_ok ? score_buy + 10 : score_buy
-// Bonus liquidità: sweep+CiSD è confluenza forte a favore del lato
-score_sell := liq_sweep_sell ? score_sell + liq_score : score_sell
-score_buy  := liq_sweep_buy  ? score_buy  + liq_score : score_buy
-
-best_score = math.max(score_sell, score_buy)
-best_dir   = score_sell > score_buy ? "SELL" : score_buy > score_sell ? "BUY" : "─"
-setup_quality = best_score >= 80 ? "FORTE 🟢" : best_score >= 50 ? "MEDIO 🟡" : "DEBOLE 🔴"
-setup_color   = best_score >= 80 ? color.lime : best_score >= 50 ? color.yellow : color.red
-
-score_ok_sell = score_sell >= eff_min_score
-score_ok_buy  = score_buy  >= eff_min_score
-
-// ─── SEGNALI ──────────────────────────────────────────────
-// Gate opzionale: richiedi lo sweep di liquidità per entrare
-liq_ok_sell = not liq_require or liq_sweep_sell
-liq_ok_buy  = not liq_require or liq_sweep_buy
-
-final_sell = confirm_sell and price_at_supply and h1_bear and m15_bear and rsi_ok_sell and hour_ok and atr_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_sell and liq_ok_sell and strategy.position_size == 0
-
-final_buy  = confirm_buy  and price_at_demand and h1_bull and m15_bull and rsi_ok_buy  and hour_ok and atr_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_buy  and liq_ok_buy  and strategy.position_size == 0
+// ─── SEGNALI (SOLO ICT) ───────────────────────────────────
+common_ok  = hour_ok and atr_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and strategy.position_size == 0
+final_sell = liq_sweep_sell and common_ok
+final_buy  = liq_sweep_buy  and common_ok
 
 // ─── POSITION SIZING DINAMICO ─────────────────────────────
 // Calcola la qty in base al rischio % e alla distanza dello SL.
@@ -314,6 +155,8 @@ f_qty(_sl_dist) =>
     _sl_dist > 0 ? risk_cash / _sl_dist : 0.0
 
 // ─── ENTRY + SL/TP ────────────────────────────────────────
+// SL oltre lo sweep (dove è stata presa la liquidità);
+// TP verso la liquidità opposta (struttura M15 / H1).
 var float sl_buy   = na
 var float tp1_buy  = na
 var float tp2_buy  = na
@@ -394,84 +237,57 @@ if strategy.position_size == 0
     be_active := false
 
 // ─── PLOT ────────────────────────────────────────────────
-plot(h1_ef,  "EMA21 H1",  color=color.new(color.blue,   40), linewidth=2, display=display.none)
-plot(h1_es,  "EMA55 H1",  color=color.new(color.purple, 40), linewidth=2, display=display.none)
-plot(m15_ef, "EMA21 M15", color=color.new(color.aqua,   40), linewidth=1, display=display.none)
-plot(m15_es, "EMA55 M15", color=color.new(color.orange, 40), linewidth=1, display=display.none)
+plot(bsl_level, "Buy-side liquidity",  color=color.new(color.red,   50), linewidth=1, style=plot.style_linebr)
+plot(ssl_level, "Sell-side liquidity", color=color.new(color.green, 50), linewidth=1, style=plot.style_linebr)
 
-plotshape(final_sell, title="Conf SELL", style=shape.triangledown, location=location.abovebar, color=color.new(color.orange,0), size=size.small, text="CS")
-plotshape(final_buy,  title="Conf BUY",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.yellow,0), size=size.small, text="CB")
-plotshape(bar_index == last_buy_bar,  title="BUY",  style=shape.triangleup,   location=location.belowbar, color=color.lime, size=size.large, text="BUY")
-plotshape(bar_index == last_sell_bar, title="SELL", style=shape.triangledown, location=location.abovebar, color=color.red,  size=size.large, text="SELL")
 plotshape(liq_sweep_sell, title="Sweep SELL (CiSD)", style=shape.xcross, location=location.abovebar, color=color.new(color.fuchsia,0), size=size.tiny, text="Liq")
 plotshape(liq_sweep_buy,  title="Sweep BUY (CiSD)",  style=shape.xcross, location=location.belowbar, color=color.new(color.aqua,0),    size=size.tiny, text="Liq")
+plotshape(bar_index == last_buy_bar,  title="BUY",  style=shape.triangleup,   location=location.belowbar, color=color.lime, size=size.large, text="BUY")
+plotshape(bar_index == last_sell_bar, title="SELL", style=shape.triangledown, location=location.abovebar, color=color.red,  size=size.large, text="SELL")
 bgcolor(not news_ok ? color.new(color.orange,90) : na)
 
 // ─── ALERT ────────────────────────────────────────────────
-alertcondition(final_buy,  title="GoldBot BUY",  message="GoldBot v5.2 BUY  XAUUSD @ {{close}}")
-alertcondition(final_sell, title="GoldBot SELL", message="GoldBot v5.2 SELL XAUUSD @ {{close}}")
+alertcondition(final_buy,  title="GoldBot ICT BUY",  message="GoldBot ICT BUY  XAUUSD @ {{close}}")
+alertcondition(final_sell, title="GoldBot ICT SELL", message="GoldBot ICT SELL XAUUSD @ {{close}}")
 
 // ─── TABELLA ──────────────────────────────────────────────
-var table t = table.new(position.middle_left, 2, 23, bgcolor=color.new(color.black,70), border_width=1, border_color=color.new(color.yellow,60))
-
-filter_status(cond) => cond ? "✅" : "❌"
+var table t = table.new(position.middle_left, 2, 13, bgcolor=color.new(color.black,70), border_width=1, border_color=color.new(color.yellow,60))
 
 sl_display  = strategy.position_size != 0 and not na(trail_sl) ? str.tostring(math.round(trail_sl,2)) : strategy.position_size > 0 ? str.tostring(math.round(sl_buy,2))   : strategy.position_size < 0 ? str.tostring(math.round(sl_sell,2))  : "─"
 tp1_display = strategy.position_size > 0 ? str.tostring(math.round(tp1_buy,2))  : strategy.position_size < 0 ? str.tostring(math.round(tp1_sell,2)) : "─"
 tp2_display = strategy.position_size > 0 ? str.tostring(math.round(tp2_buy,2))  : strategy.position_size < 0 ? str.tostring(math.round(tp2_sell,2)) : "─"
-supply_display = sup_count > 0 ? str.tostring(sup_count) + " attive (ultima: " + str.tostring(math.round(array.get(sup_bots, sup_count-1),2)) + "-" + str.tostring(math.round(array.get(sup_tops, sup_count-1),2)) + ")" : "─"
-demand_display = dem_count > 0 ? str.tostring(dem_count) + " attive (ultima: " + str.tostring(math.round(array.get(dem_bots, dem_count-1),2)) + "-" + str.tostring(math.round(array.get(dem_tops, dem_count-1),2)) + ")" : "─"
+liq_txt = liq_sweep_sell ? "SWEEP SELL ▼" : liq_sweep_buy ? "SWEEP BUY ▲" : "in attesa…"
+liq_col = liq_sweep_sell ? color.fuchsia : liq_sweep_buy ? color.aqua : color.gray
 
 if barstate.islast
     mode_badge = is_aggressive ? " ⚡" : is_extended ? " 🕐" : ""
-    table.cell(t, 0, 0,  "GoldBot v5.2" + mode_badge,  text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.black,50))
-    table.cell(t, 0, 1,  "H1 Trend",      text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 1,  h1_bull ? "RIALZISTA ▲" : "RIBASSISTA ▼", text_color=h1_bull ? color.lime : color.red, text_size=size.tiny)
-    table.cell(t, 0, 2,  "M15 Trend",     text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 2,  m15_bull ? "BUY ZONE" : "SELL ZONE", text_color=m15_bull ? color.lime : color.red, text_size=size.tiny)
-    table.cell(t, 0, 3,  "RSI M15",       text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 3,  str.tostring(math.round(m15_rsi,1)), text_color=m15_rsi > rsi_ob ? color.red : m15_rsi < rsi_os ? color.lime : color.white, text_size=size.tiny)
-    table.cell(t, 0, 4,  "Supply Zones",  text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 4,  supply_display,  text_color=sup_count > 0 ? color.red : color.gray, text_size=size.tiny)
-    table.cell(t, 0, 5,  "Demand Zones",  text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 5,  demand_display,  text_color=dem_count > 0 ? color.lime : color.gray, text_size=size.tiny)
-    table.cell(t, 0, 6,  "Notizie",       text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 6,  news_ok ? "LIBERO ✅" : "PAUSA 🔴", text_color=news_ok ? color.lime : color.red, text_size=size.tiny)
+    table.cell(t, 0, 0,  "GoldBot ICT" + mode_badge,  text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.black,50))
+    table.cell(t, 1, 0,  "Sweep + CiSD", text_color=color.gray, text_size=size.tiny, bgcolor=color.new(color.black,50))
+    table.cell(t, 0, 1,  "Buy-side liq",  text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 1,  str.tostring(math.round(bsl_level,2)), text_color=color.red, text_size=size.tiny)
+    table.cell(t, 0, 2,  "Sell-side liq", text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 2,  str.tostring(math.round(ssl_level,2)), text_color=color.lime, text_size=size.tiny)
+    table.cell(t, 0, 3,  "Segnale",       text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 3,  liq_txt, text_color=liq_col, text_size=size.tiny)
+    table.cell(t, 0, 4,  "Notizie",       text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 4,  news_ok ? "LIBERO ✅" : "PAUSA 🔴", text_color=news_ok ? color.lime : color.red, text_size=size.tiny)
     sess_label = eff_use_session ? "Sessione" : eff_force_hours ? "Orario 8-20" : "Orario"
     sess_value = hour_ok ? (eff_use_session ? "OVERLAP ✅" : "ATTIVO ✅") : "CHIUSO"
-    table.cell(t, 0, 7,  sess_label, text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 7,  sess_value, text_color=hour_ok ? color.lime : color.orange, text_size=size.tiny)
-    table.cell(t, 0, 8,  "P&L Oggi",      text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 8,  str.tostring(math.round(day_pct,2)) + "%", text_color=day_pct >= 0 ? color.lime : color.red, text_size=size.tiny)
-    table.cell(t, 0, 9,  "Trade Oggi",    text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 9,  str.tostring(trades_today) + "/" + str.tostring(eff_max_trades), text_color=trades_ok ? color.lime : color.orange, text_size=size.tiny)
-    table.cell(t, 0, 10, "SL/TP1/TP2",    text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 10, sl_display + "/" + tp1_display + "/" + tp2_display, text_color=color.silver, text_size=size.tiny)
+    table.cell(t, 0, 5,  sess_label, text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 5,  sess_value, text_color=hour_ok ? color.lime : color.orange, text_size=size.tiny)
+    table.cell(t, 0, 6,  "ATR filtro",    text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 6,  atr_ok ? "OK ✅" : "BASSO 🔴", text_color=atr_ok ? color.lime : color.red, text_size=size.tiny)
+    table.cell(t, 0, 7,  "P&L Oggi",      text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 7,  str.tostring(math.round(day_pct,2)) + "%", text_color=day_pct >= 0 ? color.lime : color.red, text_size=size.tiny)
+    table.cell(t, 0, 8,  "Trade Oggi",    text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 8,  str.tostring(trades_today) + "/" + str.tostring(eff_max_trades), text_color=trades_ok ? color.lime : color.orange, text_size=size.tiny)
+    table.cell(t, 0, 9,  "SL/TP1/TP2",    text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 9,  sl_display + "/" + tp1_display + "/" + tp2_display, text_color=color.silver, text_size=size.tiny)
     pos_tag = be_active ? (use_trail ? " TRAIL" : " BE") : ""
-    table.cell(t, 0, 11, "Posizione",     text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 11, strategy.position_size > 0 ? "LONG 🟢" + pos_tag : strategy.position_size < 0 ? "SHORT 🔴" + pos_tag : "FLAT ⚪", text_color=strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.white, text_size=size.tiny)
-    table.cell(t, 0, 12, "DD / Status",   text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 0, 10, "Posizione",     text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 10, strategy.position_size > 0 ? "LONG 🟢" + pos_tag : strategy.position_size < 0 ? "SHORT 🔴" + pos_tag : "FLAT ⚪", text_color=strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.white, text_size=size.tiny)
+    table.cell(t, 0, 11, "DD / Status",   text_color=color.gray, text_size=size.tiny)
     circuit_txt = circuit_ok ? ("ACTIVE ✅  " + str.tostring(math.round(dd_pct,1)) + "%") : ("PAUSED 🛑 " + str.tostring(pause_left) + "g")
-    table.cell(t, 1, 12, circuit_txt, text_color=circuit_ok ? color.lime : color.red, text_size=size.tiny)
-    table.cell(t, 0, 13, "Setup",         text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 13, setup_quality + " (" + str.tostring(best_score) + ") " + best_dir, text_color=setup_color, text_size=size.tiny)
-    table.cell(t, 0, 14, "── SELL ──",    text_color=color.red,  text_size=size.tiny, bgcolor=color.new(color.black,50))
-    table.cell(t, 1, 14, "",              text_color=color.red,  text_size=size.tiny, bgcolor=color.new(color.black,50))
-    table.cell(t, 0, 15, "H1 bear",       text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 15, filter_status(h1_bear), text_color=h1_bear ? color.lime : color.red, text_size=size.tiny)
-    table.cell(t, 0, 16, "Zona Supply",   text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 16, filter_status(price_at_supply), text_color=price_at_supply ? color.lime : color.red, text_size=size.tiny)
-    table.cell(t, 0, 17, "Spike + Conf",  text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 17, filter_status(confirm_sell), text_color=confirm_sell ? color.lime : color.red, text_size=size.tiny)
-    table.cell(t, 0, 18, "── BUY ──",     text_color=color.lime, text_size=size.tiny, bgcolor=color.new(color.black,50))
-    table.cell(t, 1, 18, "",              text_color=color.lime, text_size=size.tiny, bgcolor=color.new(color.black,50))
-    table.cell(t, 0, 19, "H1 bull",       text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 19, filter_status(h1_bull), text_color=h1_bull ? color.lime : color.red, text_size=size.tiny)
-    table.cell(t, 0, 20, "Zona Demand",   text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 20, filter_status(price_at_demand), text_color=price_at_demand ? color.lime : color.red, text_size=size.tiny)
-    table.cell(t, 0, 21, "Spike + Conf",  text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 21, filter_status(confirm_buy), text_color=confirm_buy ? color.lime : color.red, text_size=size.tiny)
-    liq_txt = liq_sweep_sell ? "SWEEP SELL ▼" : liq_sweep_buy ? "SWEEP BUY ▲" : (use_liquidity ? "—" : "OFF")
-    liq_col = liq_sweep_sell ? color.fuchsia : liq_sweep_buy ? color.aqua : color.gray
-    table.cell(t, 0, 22, "Liquidità" + (liq_require ? " 🔒" : ""), text_color=color.gray, text_size=size.tiny)
-    table.cell(t, 1, 22, liq_txt, text_color=liq_col, text_size=size.tiny)
+    table.cell(t, 1, 11, circuit_txt, text_color=circuit_ok ? color.lime : color.red, text_size=size.tiny)
+    table.cell(t, 0, 12, "Cooldown",      text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 12, cooldown_ok ? "PRONTO ✅" : "ATTESA ⏳", text_color=cooldown_ok ? color.lime : color.orange, text_size=size.tiny)

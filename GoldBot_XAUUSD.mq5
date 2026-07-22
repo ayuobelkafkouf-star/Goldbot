@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
 //|                                              GoldBot_XAUUSD.mq5  |
-//|                              Conversione da Pine Script v5.2     |
+//|              Strategia ICT pura: Liquidity Sweep + CiSD          |
 //+------------------------------------------------------------------+
-#property copyright "GoldBot v5.2 MQL5"
-#property version   "5.20"
+#property copyright "GoldBot ICT MQL5"
+#property version   "6.00"
 #property strict
-#property description "GoldBot XAUUSD - Multi-zone S/D, 3 modalità, risk dinamico, trailing ATR"
+#property description "GoldBot XAUUSD - Strategia ICT: Liquidity Sweep + CiSD, risk dinamico, trailing ATR"
 
 #include <Trade\Trade.mqh>
 #include <Trade\PositionInfo.mqh>
@@ -20,36 +20,11 @@ enum ENUM_MODE { MODE_CONSERVATIVE, MODE_EXTENDED, MODE_AGGRESSIVE };
 
 input group "═══ Modalità ═══"
 input ENUM_MODE InpMode        = MODE_CONSERVATIVE; // Modalità operativa
-input int       InpMinScore    = 60;   // Score minimo per trade (Estesa = min 70)
-input int       InpMaxZones    = 5;    // Zone attive max per lato
 
-input group "═══ Trend ═══"
-input int       InpH1Fast      = 21;   // H1 EMA veloce
-input int       InpH1Slow      = 55;   // H1 EMA lenta
-input int       InpM15Fast     = 21;   // M15 EMA veloce
-input int       InpM15Slow     = 55;   // M15 EMA lenta
-
-input group "═══ RSI ═══"
-input int       InpRSILen      = 14;   // RSI periodo
-input int       InpRSIOB       = 65;   // RSI ipercomprato
-input int       InpRSIOS       = 35;   // RSI ipervenduto
-
-input group "═══ Zone S/D ═══"
-input int       InpPivotLeft   = 5;    // Pivot left bars
-input int       InpPivotRight  = 3;    // Pivot right bars
-input double    InpZoneWidth   = 1.5;  // Larghezza zona ATR
-input double    InpZoneTol     = 0.5;  // Tolleranza retest ATR
-
-input group "═══ Spike + Conferma ═══"
-input double    InpSpikeMult   = 0.5;  // Spike minimo ATR
-input double    InpBodyMult    = 0.3;  // Body conferma minimo ATR
-
-input group "═══ ICT / Liquidità ═══"
-input bool      InpUseLiquidity = true; // Abilita sweep liquidità + CiSD
+input group "═══ ICT: Liquidity Sweep + CiSD ═══"
 input int       InpLiqLookback  = 20;   // Barre lookback pool liquidità
 input double    InpLiqBufferAtr = 0.1;  // Buffer sweep oltre il livello (ATR)
-input bool      InpLiqRequire   = false;// Richiedi sweep per entrare (hard-gate)
-input int       InpLiqScore     = 20;   // Bonus score su sweep+CiSD
+input double    InpCisdBodyMult = 0.3;  // Displacement: corpo minimo CiSD (ATR)
 
 input group "═══ Rischio ═══"
 input double    InpRiskPct     = 0.5;  // Rischio % per trade
@@ -98,15 +73,7 @@ input int       InpSlippagePts = 30;   // Slippage in punti
 
 //============================ GLOBALS ==============================
 // Handle indicatori
-int h_h1_ef, h_h1_es;
-int h_m15_ef, h_m15_es, h_m15_rsi, h_m15_atr;
-int h_atr_local;
-
-// Multi-zone arrays
-double  g_sup_tops[];
-double  g_sup_bots[];
-double  g_dem_tops[];
-double  g_dem_bots[];
+int h_m15_atr, h_atr_local;
 
 // State
 datetime g_last_m15_bar = 0;
@@ -131,14 +98,14 @@ bool     g_is_long   = false;
 // Liquidity sweep + CiSD state
 bool     g_liq_sweep_sell = false; // buy-side liquidity grab + rigetto → SELL
 bool     g_liq_sweep_buy  = false; // sell-side liquidity grab + rigetto → BUY
+double   g_bsl_level      = 0;     // buy-side liquidity pool
+double   g_ssl_level      = 0;     // sell-side liquidity pool
 
 // Effective values (set per modalità)
 bool   g_eff_use_session;
 bool   g_eff_force_hours;
 int    g_eff_cooldown;
 int    g_eff_max_trades;
-double g_eff_zone_tol;
-int    g_eff_min_score;
 
 // Timezone offset (server vs Europe/Rome)
 int g_tz_offset_hours = 0;
@@ -156,27 +123,14 @@ int OnInit()
    Trade.SetTypeFillingBySymbol(_Symbol);
    Trade.SetMarginMode();
 
-   h_h1_ef    = iMA (_Symbol, PERIOD_H1,  InpH1Fast,  0, MODE_EMA, PRICE_CLOSE);
-   h_h1_es    = iMA (_Symbol, PERIOD_H1,  InpH1Slow,  0, MODE_EMA, PRICE_CLOSE);
-   h_m15_ef   = iMA (_Symbol, PERIOD_M15, InpM15Fast, 0, MODE_EMA, PRICE_CLOSE);
-   h_m15_es   = iMA (_Symbol, PERIOD_M15, InpM15Slow, 0, MODE_EMA, PRICE_CLOSE);
-   h_m15_rsi  = iRSI(_Symbol, PERIOD_M15, InpRSILen, PRICE_CLOSE);
    h_m15_atr  = iATR(_Symbol, PERIOD_M15, 14);
    h_atr_local= iATR(_Symbol, _Period,    14);
 
-   if(h_h1_ef==INVALID_HANDLE || h_h1_es==INVALID_HANDLE ||
-      h_m15_ef==INVALID_HANDLE|| h_m15_es==INVALID_HANDLE||
-      h_m15_rsi==INVALID_HANDLE||h_m15_atr==INVALID_HANDLE||
-      h_atr_local==INVALID_HANDLE)
+   if(h_m15_atr==INVALID_HANDLE || h_atr_local==INVALID_HANDLE)
    {
       Print("Errore creazione handles indicatori");
       return INIT_FAILED;
    }
-
-   ArrayResize(g_sup_tops, 0);
-   ArrayResize(g_sup_bots, 0);
-   ArrayResize(g_dem_tops, 0);
-   ArrayResize(g_dem_bots, 0);
 
    g_eq_peak = AccountInfoDouble(ACCOUNT_EQUITY);
    g_day_eq  = g_eq_peak;
@@ -184,7 +138,7 @@ int OnInit()
    ApplyMode();
    ComputeTzOffset();
 
-   Comment("GoldBot v5.2 MQL5 inizializzato — modalità: ", ModeName());
+   Comment("GoldBot ICT MQL5 inizializzato — modalità: ", ModeName());
    return INIT_SUCCEEDED;
 }
 
@@ -193,11 +147,6 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-   IndicatorRelease(h_h1_ef);
-   IndicatorRelease(h_h1_es);
-   IndicatorRelease(h_m15_ef);
-   IndicatorRelease(h_m15_es);
-   IndicatorRelease(h_m15_rsi);
    IndicatorRelease(h_m15_atr);
    IndicatorRelease(h_atr_local);
    Comment("");
@@ -232,8 +181,6 @@ void ApplyMode()
    g_eff_force_hours = is_ext || is_aggr;
    g_eff_cooldown    = is_aggr ? 2  : InpCooldownBars;
    g_eff_max_trades  = is_aggr ? 10 : InpMaxTradesDay;
-   g_eff_zone_tol    = is_aggr ? 0.7: InpZoneTol;
-   g_eff_min_score   = is_ext  ? (int)MathMax(InpMinScore, 70) : InpMinScore;
 }
 
 string ModeName()
@@ -248,13 +195,10 @@ string ModeName()
 //+------------------------------------------------------------------+
 void ComputeTzOffset()
 {
-   MqlDateTime s, l;
-   TimeToStruct(TimeGMT(), s);
    datetime gmt = TimeGMT();
    datetime srv = TimeCurrent();
    int diff = (int)((srv - gmt) / 3600);
    // Europe/Rome = GMT+1 (inverno) / GMT+2 (estate, CEST)
-   // Stima dst: aprile-ottobre = +2, altrimenti +1
    MqlDateTime g; TimeToStruct(gmt, g);
    int rome_offset = (g.mon >= 4 && g.mon <= 10) ? 2 : 1;
    g_tz_offset_hours = rome_offset - diff;
@@ -298,59 +242,62 @@ bool GetBuf(int handle, int shift, double &out)
 }
 
 //+------------------------------------------------------------------+
+//| Liquidity Sweep + CiSD                                            |
+//| Buy-side liquidity  = massimo dei bar precedenti (stop dei buy)   |
+//| Sell-side liquidity = minimo dei bar precedenti (stop dei sell)   |
+//| Sweep+CiSD: il bar wicka OLTRE il pool ma RICHIUDE dall'altra      |
+//| parte con corpo direzionale (displacement) = cambio di stato di   |
+//| consegna → segnale di ingresso.                                   |
+//+------------------------------------------------------------------+
+void DetectLiquiditySweep(double atr_m15)
+{
+   g_liq_sweep_sell = false;
+   g_liq_sweep_buy  = false;
+   g_bsl_level = 0;
+   g_ssl_level = 0;
+   if(atr_m15 <= 0) return;
+
+   // Pool calcolati sui bar precedenti al bar di sweep (shift 2..lookback+1)
+   int hi_idx = iHighest(_Symbol, PERIOD_M15, MODE_HIGH, InpLiqLookback, 2);
+   int lo_idx = iLowest (_Symbol, PERIOD_M15, MODE_LOW,  InpLiqLookback, 2);
+   if(hi_idx < 0 || lo_idx < 0) return;
+
+   g_bsl_level = iHigh(_Symbol, PERIOD_M15, hi_idx); // buy-side liquidity
+   g_ssl_level = iLow (_Symbol, PERIOD_M15, lo_idx); // sell-side liquidity
+
+   double o = iOpen (_Symbol, PERIOD_M15, 1);
+   double h = iHigh (_Symbol, PERIOD_M15, 1);
+   double l = iLow  (_Symbol, PERIOD_M15, 1);
+   double c = iClose(_Symbol, PERIOD_M15, 1);
+   double buf  = atr_m15 * InpLiqBufferAtr;
+   double body = MathAbs(c - o);
+   bool   displaced = body >= atr_m15 * InpCisdBodyMult;
+
+   // Sweep della buy-side liquidity + rigetto ribassista (CiSD down) → SELL
+   if(h > g_bsl_level + buf && c < g_bsl_level && c < o && displaced)
+      g_liq_sweep_sell = true;
+
+   // Sweep della sell-side liquidity + rigetto rialzista (CiSD up) → BUY
+   if(l < g_ssl_level - buf && c > g_ssl_level && c > o && displaced)
+      g_liq_sweep_buy = true;
+}
+
+//+------------------------------------------------------------------+
 //| Process new closed M15 bar                                        |
 //+------------------------------------------------------------------+
 void ProcessNewBar()
 {
-   // Tutti i valori HTF/M15 vengono letti al bar 1 (appena chiuso)
-   double h1_ef, h1_es, m15_ef, m15_es, m15_rsi_v, m15_atr_v, atr_local;
-   if(!GetBuf(h_h1_ef, 1, h1_ef))   return;
-   if(!GetBuf(h_h1_es, 1, h1_es))   return;
-   if(!GetBuf(h_m15_ef,1, m15_ef))  return;
-   if(!GetBuf(h_m15_es,1, m15_es))  return;
-   if(!GetBuf(h_m15_rsi,1,m15_rsi_v))return;
-   if(!GetBuf(h_m15_atr,1,m15_atr_v))return;
-   if(!GetBuf(h_atr_local,1,atr_local))return;
+   double m15_atr_v, atr_local;
+   if(!GetBuf(h_m15_atr, 1, m15_atr_v)) return;
+   if(!GetBuf(h_atr_local,1, atr_local))return;
 
-   double m15_o = iOpen (_Symbol, PERIOD_M15, 1);
-   double m15_h = iHigh (_Symbol, PERIOD_M15, 1);
-   double m15_l = iLow  (_Symbol, PERIOD_M15, 1);
-   double m15_c = iClose(_Symbol, PERIOD_M15, 1);
-   double m15_h_prev = iHigh(_Symbol, PERIOD_M15, 2);
-   double m15_l_prev = iLow (_Symbol, PERIOD_M15, 2);
-
-   // Trend
-   bool h1_bull  = h1_ef > h1_es;
-   bool h1_bear  = h1_ef < h1_es;
-   bool m15_bull = m15_ef > m15_es;
-   bool m15_bear = m15_ef < m15_es;
-
-   // Pivot detection (su barre M15 chiuse)
-   double new_ph, new_pl;
-   bool has_ph = DetectPivotHigh(m15_atr_v, new_ph);
-   bool has_pl = DetectPivotLow (m15_atr_v, new_pl);
-
-   if(has_ph) PushSupplyZone(new_ph, m15_atr_v);
-   if(has_pl) PushDemandZone(new_pl, m15_atr_v);
-
-   InvalidateZones(m15_c, m15_atr_v);
-
-   // Liquidity sweep + CiSD sul bar appena chiuso
+   // Segnale di ingresso: liquidity sweep + CiSD sul bar appena chiuso
    DetectLiquiditySweep(m15_atr_v);
 
-   // Retest zona
-   bool price_at_supply = IsAtSupply(m15_h, m15_atr_v);
-   bool price_at_demand = IsAtDemand(m15_l, m15_atr_v);
+   double m15_h = iHigh(_Symbol, PERIOD_M15, 1);
+   double m15_l = iLow (_Symbol, PERIOD_M15, 1);
 
-   // Spike + conferma
-   bool spike_up   = (m15_h - m15_l) >= m15_atr_v * InpSpikeMult && m15_h > m15_h_prev;
-   bool spike_down = (m15_h - m15_l) >= m15_atr_v * InpSpikeMult && m15_l < m15_l_prev;
-   double body_sell = m15_o - m15_c;
-   double body_buy  = m15_c - m15_o;
-   bool confirm_sell = spike_up   && m15_c < m15_o && body_sell >= m15_atr_v * InpBodyMult;
-   bool confirm_buy  = spike_down && m15_c > m15_o && body_buy  >= m15_atr_v * InpBodyMult;
-
-   // Filtri
+   // Filtri temporali
    datetime now = TimeCurrent();
    int h_rome = RomeHour(now);
    int m_rome = RomeMinute(now);
@@ -360,8 +307,6 @@ void ProcessNewBar()
    bool hour_ok    = g_eff_use_session ? session_ok : (g_eff_force_hours ? hours_ok : true);
 
    bool atr_ok     = !InpUseATR || atr_local >= InpATRMin;
-   bool rsi_ok_sell= m15_rsi_v > 45 && m15_rsi_v < InpRSIOB;
-   bool rsi_ok_buy = m15_rsi_v < 55 && m15_rsi_v > InpRSIOS;
    bool news_ok    = !InpUseNews || !IsNewsTime(h_rome, m_rome);
 
    // Day rollover
@@ -388,197 +333,17 @@ void ProcessNewBar()
       g_pause_until_d = g_day_counter + InpPauseDays;
    bool circuit_ok = !InpUseCircuit || g_day_counter >= g_pause_until_d;
 
-   // Score
-   int score_sell = 0, score_buy = 0;
-   if(h1_bear)         score_sell += 25;
-   if(h1_bull)         score_buy  += 25;
-   if(m15_bear)        score_sell += 20;
-   if(m15_bull)        score_buy  += 20;
-   if(price_at_supply) score_sell += 20;
-   if(price_at_demand) score_buy  += 20;
-   if(rsi_ok_sell)     score_sell += 15;
-   if(rsi_ok_buy)      score_buy  += 15;
-   // Volume high (vs SMA20)
-   long  v_arr[]; ArraySetAsSeries(v_arr, true);
-   long  v_now=0, v_sma=0;
-   if(CopyTickVolume(_Symbol, PERIOD_M15, 1, 21, v_arr) == 21)
-   {
-      v_now = v_arr[0];
-      long sum=0; for(int i=1;i<=20;i++) sum += v_arr[i];
-      v_sma = sum/20;
-   }
-   bool vol_high = (v_sma>0) && (v_now > v_sma * 1.2);
-   if(vol_high)        { score_sell += 10; score_buy += 10; }
-   if(atr_ok)          { score_sell += 10; score_buy += 10; }
-   // Bonus liquidità: sweep+CiSD è confluenza forte a favore del lato
-   if(g_liq_sweep_sell) score_sell += InpLiqScore;
-   if(g_liq_sweep_buy)  score_buy  += InpLiqScore;
-
-   bool score_ok_sell = score_sell >= g_eff_min_score;
-   bool score_ok_buy  = score_buy  >= g_eff_min_score;
-
-   // Gate opzionale: richiedi lo sweep di liquidità per entrare
-   bool liq_ok_sell = !InpLiqRequire || g_liq_sweep_sell;
-   bool liq_ok_buy  = !InpLiqRequire || g_liq_sweep_buy;
-
-   // Segnali finali
+   // Filtri di sicurezza comuni
    bool no_position = !HasOpenPosition();
-   bool final_sell = confirm_sell && price_at_supply && h1_bear && m15_bear && rsi_ok_sell &&
-                     hour_ok && atr_ok && news_ok && cooldown_ok && trades_ok &&
-                     day_ok && circuit_ok && score_ok_sell && liq_ok_sell && no_position;
-   bool final_buy  = confirm_buy  && price_at_demand && h1_bull && m15_bull && rsi_ok_buy  &&
-                     hour_ok && atr_ok && news_ok && cooldown_ok && trades_ok &&
-                     day_ok && circuit_ok && score_ok_buy  && liq_ok_buy  && no_position;
+   bool common_ok   = hour_ok && atr_ok && news_ok && cooldown_ok && trades_ok &&
+                      day_ok && circuit_ok && no_position;
+
+   // Segnali finali: SOLO liquidity sweep + CiSD
+   bool final_sell = g_liq_sweep_sell && common_ok;
+   bool final_buy  = g_liq_sweep_buy  && common_ok;
 
    if(final_buy)  OpenLong (m15_l, m15_atr_v, atr_local);
    if(final_sell) OpenShort(m15_h, m15_atr_v, atr_local);
-}
-
-//+------------------------------------------------------------------+
-//| Pivot detection — barra (right+1) deve essere highest/lowest      |
-//| nel range [1 .. right+left+1]                                     |
-//+------------------------------------------------------------------+
-bool DetectPivotHigh(double atr_m15, double &out_value)
-{
-   int pivot_idx = InpPivotRight + 1;
-   int total = InpPivotLeft + InpPivotRight + 1;
-   double phigh = iHigh(_Symbol, PERIOD_M15, pivot_idx);
-   for(int i = 1; i <= pivot_idx + InpPivotLeft; i++)
-   {
-      if(i == pivot_idx) continue;
-      double h = iHigh(_Symbol, PERIOD_M15, i);
-      if(h >= phigh) return false;
-   }
-   out_value = phigh;
-   return true;
-}
-
-bool DetectPivotLow(double atr_m15, double &out_value)
-{
-   int pivot_idx = InpPivotRight + 1;
-   double plow = iLow(_Symbol, PERIOD_M15, pivot_idx);
-   for(int i = 1; i <= pivot_idx + InpPivotLeft; i++)
-   {
-      if(i == pivot_idx) continue;
-      double l = iLow(_Symbol, PERIOD_M15, i);
-      if(l <= plow) return false;
-   }
-   out_value = plow;
-   return true;
-}
-
-//+------------------------------------------------------------------+
-//| Push/trim zone arrays                                             |
-//+------------------------------------------------------------------+
-void PushSupplyZone(double pivot_high, double atr_m15)
-{
-   double top = pivot_high;
-   double bot = pivot_high - atr_m15 * InpZoneWidth;
-   int sz = ArraySize(g_sup_tops);
-   ArrayResize(g_sup_tops, sz+1);
-   ArrayResize(g_sup_bots, sz+1);
-   g_sup_tops[sz] = top;
-   g_sup_bots[sz] = bot;
-   // Trim
-   while(ArraySize(g_sup_tops) > InpMaxZones)
-   {
-      ArrayRemoveAt(g_sup_tops, 0);
-      ArrayRemoveAt(g_sup_bots, 0);
-   }
-}
-
-void PushDemandZone(double pivot_low, double atr_m15)
-{
-   double bot = pivot_low;
-   double top = pivot_low + atr_m15 * InpZoneWidth;
-   int sz = ArraySize(g_dem_tops);
-   ArrayResize(g_dem_tops, sz+1);
-   ArrayResize(g_dem_bots, sz+1);
-   g_dem_tops[sz] = top;
-   g_dem_bots[sz] = bot;
-   while(ArraySize(g_dem_tops) > InpMaxZones)
-   {
-      ArrayRemoveAt(g_dem_tops, 0);
-      ArrayRemoveAt(g_dem_bots, 0);
-   }
-}
-
-void ArrayRemoveAt(double &arr[], int idx)
-{
-   int n = ArraySize(arr);
-   if(idx < 0 || idx >= n) return;
-   for(int i = idx; i < n-1; i++) arr[i] = arr[i+1];
-   ArrayResize(arr, n-1);
-}
-
-void InvalidateZones(double m15_close, double atr_m15)
-{
-   for(int i = ArraySize(g_sup_tops) - 1; i >= 0; i--)
-      if(m15_close > g_sup_tops[i] + atr_m15 * 0.5)
-      {
-         ArrayRemoveAt(g_sup_tops, i);
-         ArrayRemoveAt(g_sup_bots, i);
-      }
-   for(int i = ArraySize(g_dem_tops) - 1; i >= 0; i--)
-      if(m15_close < g_dem_bots[i] - atr_m15 * 0.5)
-      {
-         ArrayRemoveAt(g_dem_tops, i);
-         ArrayRemoveAt(g_dem_bots, i);
-      }
-}
-
-bool IsAtSupply(double m15_high, double atr_m15)
-{
-   for(int i = 0; i < ArraySize(g_sup_tops); i++)
-      if(m15_high >= g_sup_bots[i] - atr_m15 * g_eff_zone_tol &&
-         m15_high <= g_sup_tops[i] + atr_m15 * g_eff_zone_tol)
-         return true;
-   return false;
-}
-
-bool IsAtDemand(double m15_low, double atr_m15)
-{
-   for(int i = 0; i < ArraySize(g_dem_tops); i++)
-      if(m15_low <= g_dem_tops[i] + atr_m15 * g_eff_zone_tol &&
-         m15_low >= g_dem_bots[i] - atr_m15 * g_eff_zone_tol)
-         return true;
-   return false;
-}
-
-//+------------------------------------------------------------------+
-//| Liquidity Sweep + CiSD                                            |
-//| Buy-side liquidity  = massimo dei bar precedenti (stop dei buy)   |
-//| Sell-side liquidity = minimo dei bar precedenti (stop dei sell)   |
-//| Sweep+CiSD: il bar wicka OLTRE il pool ma RICHIUDE dall'altra      |
-//| parte con corpo direzionale = cambio di stato di consegna.        |
-//+------------------------------------------------------------------+
-void DetectLiquiditySweep(double atr_m15)
-{
-   g_liq_sweep_sell = false;
-   g_liq_sweep_buy  = false;
-   if(!InpUseLiquidity || atr_m15 <= 0) return;
-
-   // Pool calcolati sui bar precedenti al bar di sweep (shift 2..lookback+1)
-   int hi_idx = iHighest(_Symbol, PERIOD_M15, MODE_HIGH, InpLiqLookback, 2);
-   int lo_idx = iLowest (_Symbol, PERIOD_M15, MODE_LOW,  InpLiqLookback, 2);
-   if(hi_idx < 0 || lo_idx < 0) return;
-
-   double bsl = iHigh(_Symbol, PERIOD_M15, hi_idx); // buy-side liquidity
-   double ssl = iLow (_Symbol, PERIOD_M15, lo_idx); // sell-side liquidity
-
-   double o = iOpen (_Symbol, PERIOD_M15, 1);
-   double h = iHigh (_Symbol, PERIOD_M15, 1);
-   double l = iLow  (_Symbol, PERIOD_M15, 1);
-   double c = iClose(_Symbol, PERIOD_M15, 1);
-   double buf = atr_m15 * InpLiqBufferAtr;
-
-   // Sweep della buy-side liquidity + rigetto ribassista (CiSD down) → SELL
-   if(h > bsl + buf && c < bsl && c < o)
-      g_liq_sweep_sell = true;
-
-   // Sweep della sell-side liquidity + rigetto rialzista (CiSD up) → BUY
-   if(l < ssl - buf && c > ssl && c > o)
-      g_liq_sweep_buy = true;
 }
 
 //+------------------------------------------------------------------+
@@ -666,13 +431,15 @@ double CalculateLotSize(double sl_distance_price)
 
 //+------------------------------------------------------------------+
 //| Apertura ordini                                                   |
+//| SL oltre lo sweep (dove è stata presa la liquidità);              |
+//| TP verso la liquidità opposta (struttura M15 / H1).               |
 //+------------------------------------------------------------------+
 void OpenLong(double m15_low, double atr_m15, double atr_local)
 {
    Sym.RefreshRates();
    double price = Sym.Ask();
    double sl    = m15_low - atr_local * InpSLAtrMult;
-   // TP1 = struct high M15, TP2 = struct high H1
+   // TP1 = struct high M15, TP2 = struct high H1 (buy-side liquidity opposta)
    double tp1 = iHigh(_Symbol, PERIOD_M15, iHighest(_Symbol, PERIOD_M15, MODE_HIGH, 20, 1));
    double tp2 = iHigh(_Symbol, PERIOD_H1,  iHighest(_Symbol, PERIOD_H1,  MODE_HIGH, 20, 1));
    if(tp1 <= price || tp2 <= tp1) return; // sanity
@@ -680,7 +447,7 @@ void OpenLong(double m15_low, double atr_m15, double atr_local)
    double lots = CalculateLotSize(price - sl);
    if(lots <= 0) return;
 
-   if(Trade.Buy(lots, _Symbol, price, sl, tp2, "GoldBot BUY"))
+   if(Trade.Buy(lots, _Symbol, price, sl, tp2, "GoldBot ICT BUY"))
    {
       g_entry_px = price;
       g_sl_px    = sl;
@@ -705,7 +472,7 @@ void OpenShort(double m15_high, double atr_m15, double atr_local)
    double lots = CalculateLotSize(sl - price);
    if(lots <= 0) return;
 
-   if(Trade.Sell(lots, _Symbol, price, sl, tp2, "GoldBot SELL"))
+   if(Trade.Sell(lots, _Symbol, price, sl, tp2, "GoldBot ICT SELL"))
    {
       g_entry_px = price;
       g_sl_px    = sl;
@@ -828,21 +595,20 @@ void UpdateDashboard()
    double day_pct = g_day_eq > 0 ? (eq - g_day_eq) / g_day_eq * 100.0 : 0;
    int pause_left = MathMax(0, g_pause_until_d - g_day_counter);
 
+   string liq = g_liq_sweep_sell ? "SWEEP SELL ▼" : (g_liq_sweep_buy ? "SWEEP BUY ▲" : "in attesa…");
+
    string status = "";
-   status += "═══ GoldBot v5.2 MQL5 ═══\n";
+   status += "═══ GoldBot ICT MQL5 ═══\n";
+   status += "Strategia: Liquidity Sweep + CiSD\n";
    status += "Modalità: " + ModeName() + "\n";
    status += "Equity: "   + DoubleToString(eq, 2) + "\n";
    status += "P&L oggi: " + DoubleToString(day_pct, 2) + "%\n";
    status += "Trade oggi: " + IntegerToString(g_trades_today) + "/" + IntegerToString(g_eff_max_trades) + "\n";
    status += "DD dal peak: " + DoubleToString(dd_pct, 2) + "%\n";
    status += "Status: " + (pause_left>0 ? ("PAUSED " + IntegerToString(pause_left) + "g") : "ACTIVE") + "\n";
-   status += "Supply zones: " + IntegerToString(ArraySize(g_sup_tops)) + "\n";
-   status += "Demand zones: " + IntegerToString(ArraySize(g_dem_tops)) + "\n";
-   if(InpUseLiquidity)
-   {
-      string liq = g_liq_sweep_sell ? "SWEEP SELL ▼" : (g_liq_sweep_buy ? "SWEEP BUY ▲" : "—");
-      status += "Liquidità: " + liq + (InpLiqRequire ? " [gate ON]" : "") + "\n";
-   }
+   status += "Buy-side liq: "  + DoubleToString(g_bsl_level, 2) + "\n";
+   status += "Sell-side liq: " + DoubleToString(g_ssl_level, 2) + "\n";
+   status += "Segnale: " + liq + "\n";
    if(HasOpenPosition())
    {
       status += "Posizione: " + (g_is_long ? "LONG" : "SHORT");
