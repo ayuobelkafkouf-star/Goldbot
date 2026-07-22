@@ -29,6 +29,12 @@ zone_tol    = input.float(0.5, "Tolleranza retest ATR", group="Zone", minval=0.1
 spike_mult  = input.float(0.5, "Spike minimo ATR", group="Spike", minval=0.1, maxval=2.0)
 body_mult   = input.float(0.3, "Body conferma minimo ATR", group="Spike", minval=0.1, maxval=1.0)
 
+use_liquidity  = input.bool(true, "Abilita sweep liquidità + CiSD", group="ICT / Liquidità", tooltip="Riconosce quando il prezzo spazza la liquidità (massimo/minimo recente) e poi rigetta dall'altra parte con corpo direzionale = Change in State of Delivery.")
+liq_lookback   = input.int(20, "Barre lookback pool liquidità", group="ICT / Liquidità", minval=5, maxval=100)
+liq_buffer_atr = input.float(0.1, "Buffer sweep oltre livello (ATR)", group="ICT / Liquidità", minval=0.0, maxval=1.0, step=0.05)
+liq_require    = input.bool(false, "Richiedi sweep per entrare (hard-gate)", group="ICT / Liquidità")
+liq_score      = input.int(20, "Bonus score sweep+CiSD", group="ICT / Liquidità", minval=0, maxval=50)
+
 risk_pct    = input.float(0.5, "Rischio % per trade", group="Rischio", minval=0.1, maxval=3.0, step=0.1)
 sl_atr_mult = input.float(0.4, "SL buffer ATR", group="Rischio", minval=0.1, maxval=2.0, step=0.1)
 tp1_pct     = input.float(70,  "% chiusura TP1", group="Rischio", minval=10, maxval=90)
@@ -86,6 +92,9 @@ m15_struct_high = f_sec("15", ta.highest(high, 20))
 m15_struct_low  = f_sec("15", ta.lowest (low,  20))
 h1_struct_high  = f_sec("60", ta.highest(high, 20))
 h1_struct_low   = f_sec("60", ta.lowest (low,  20))
+// Pool di liquidità: massimo/minimo dei bar PRECEDENTI a quello di sweep ([1] extra).
+bsl_level  = f_sec("15", ta.highest(high, liq_lookback)[1])
+ssl_level  = f_sec("15", ta.lowest (low,  liq_lookback)[1])
 atr_val    = ta.atr(14)
 
 // ─── TREND ────────────────────────────────────────────────
@@ -200,6 +209,13 @@ body_buy  = m15_close - m15_open
 confirm_sell = spike_up   and m15_close < m15_open and body_sell >= m15_atr * body_mult
 confirm_buy  = spike_down and m15_close > m15_open and body_buy  >= m15_atr * body_mult
 
+// ─── LIQUIDITY SWEEP + CiSD ───────────────────────────────
+// Sweep: il bar wicka OLTRE il pool (buy-side/sell-side) ma richiude
+// dall'altra parte con corpo direzionale = Change in State of Delivery.
+liq_buf = m15_atr * liq_buffer_atr
+liq_sweep_sell = use_liquidity and m15_high > bsl_level + liq_buf and m15_close < bsl_level and m15_close < m15_open
+liq_sweep_buy  = use_liquidity and m15_low  < ssl_level - liq_buf and m15_close > ssl_level and m15_close > m15_open
+
 // ─── FILTRI ───────────────────────────────────────────────
 h_now       = hour(time, "Europe/Rome")
 session_ok  = h_now >= session_start and h_now < session_end
@@ -270,6 +286,9 @@ score_sell := vol_high ? score_sell + 10 : score_sell
 score_buy  := vol_high ? score_buy + 10 : score_buy
 score_sell := atr_ok ? score_sell + 10 : score_sell
 score_buy  := atr_ok ? score_buy + 10 : score_buy
+// Bonus liquidità: sweep+CiSD è confluenza forte a favore del lato
+score_sell := liq_sweep_sell ? score_sell + liq_score : score_sell
+score_buy  := liq_sweep_buy  ? score_buy  + liq_score : score_buy
 
 best_score = math.max(score_sell, score_buy)
 best_dir   = score_sell > score_buy ? "SELL" : score_buy > score_sell ? "BUY" : "─"
@@ -280,9 +299,13 @@ score_ok_sell = score_sell >= eff_min_score
 score_ok_buy  = score_buy  >= eff_min_score
 
 // ─── SEGNALI ──────────────────────────────────────────────
-final_sell = confirm_sell and price_at_supply and h1_bear and m15_bear and rsi_ok_sell and hour_ok and atr_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_sell and strategy.position_size == 0
+// Gate opzionale: richiedi lo sweep di liquidità per entrare
+liq_ok_sell = not liq_require or liq_sweep_sell
+liq_ok_buy  = not liq_require or liq_sweep_buy
 
-final_buy  = confirm_buy  and price_at_demand and h1_bull and m15_bull and rsi_ok_buy  and hour_ok and atr_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_buy  and strategy.position_size == 0
+final_sell = confirm_sell and price_at_supply and h1_bear and m15_bear and rsi_ok_sell and hour_ok and atr_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_sell and liq_ok_sell and strategy.position_size == 0
+
+final_buy  = confirm_buy  and price_at_demand and h1_bull and m15_bull and rsi_ok_buy  and hour_ok and atr_ok and news_ok and cooldown_ok and trades_ok and day_ok and circuit_ok and score_ok_buy  and liq_ok_buy  and strategy.position_size == 0
 
 // ─── POSITION SIZING DINAMICO ─────────────────────────────
 // Calcola la qty in base al rischio % e alla distanza dello SL.
@@ -380,6 +403,8 @@ plotshape(final_sell, title="Conf SELL", style=shape.triangledown, location=loca
 plotshape(final_buy,  title="Conf BUY",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.yellow,0), size=size.small, text="CB")
 plotshape(bar_index == last_buy_bar,  title="BUY",  style=shape.triangleup,   location=location.belowbar, color=color.lime, size=size.large, text="BUY")
 plotshape(bar_index == last_sell_bar, title="SELL", style=shape.triangledown, location=location.abovebar, color=color.red,  size=size.large, text="SELL")
+plotshape(liq_sweep_sell, title="Sweep SELL (CiSD)", style=shape.xcross, location=location.abovebar, color=color.new(color.fuchsia,0), size=size.tiny, text="Liq")
+plotshape(liq_sweep_buy,  title="Sweep BUY (CiSD)",  style=shape.xcross, location=location.belowbar, color=color.new(color.aqua,0),    size=size.tiny, text="Liq")
 bgcolor(not news_ok ? color.new(color.orange,90) : na)
 
 // ─── ALERT ────────────────────────────────────────────────
@@ -387,7 +412,7 @@ alertcondition(final_buy,  title="GoldBot BUY",  message="GoldBot v5.2 BUY  XAUU
 alertcondition(final_sell, title="GoldBot SELL", message="GoldBot v5.2 SELL XAUUSD @ {{close}}")
 
 // ─── TABELLA ──────────────────────────────────────────────
-var table t = table.new(position.middle_left, 2, 22, bgcolor=color.new(color.black,70), border_width=1, border_color=color.new(color.yellow,60))
+var table t = table.new(position.middle_left, 2, 23, bgcolor=color.new(color.black,70), border_width=1, border_color=color.new(color.yellow,60))
 
 filter_status(cond) => cond ? "✅" : "❌"
 
@@ -446,3 +471,7 @@ if barstate.islast
     table.cell(t, 1, 20, filter_status(price_at_demand), text_color=price_at_demand ? color.lime : color.red, text_size=size.tiny)
     table.cell(t, 0, 21, "Spike + Conf",  text_color=color.gray, text_size=size.tiny)
     table.cell(t, 1, 21, filter_status(confirm_buy), text_color=confirm_buy ? color.lime : color.red, text_size=size.tiny)
+    liq_txt = liq_sweep_sell ? "SWEEP SELL ▼" : liq_sweep_buy ? "SWEEP BUY ▲" : (use_liquidity ? "—" : "OFF")
+    liq_col = liq_sweep_sell ? color.fuchsia : liq_sweep_buy ? color.aqua : color.gray
+    table.cell(t, 0, 22, "Liquidità" + (liq_require ? " 🔒" : ""), text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 22, liq_txt, text_color=liq_col, text_size=size.tiny)

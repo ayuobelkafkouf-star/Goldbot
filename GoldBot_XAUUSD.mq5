@@ -44,6 +44,13 @@ input group "═══ Spike + Conferma ═══"
 input double    InpSpikeMult   = 0.5;  // Spike minimo ATR
 input double    InpBodyMult    = 0.3;  // Body conferma minimo ATR
 
+input group "═══ ICT / Liquidità ═══"
+input bool      InpUseLiquidity = true; // Abilita sweep liquidità + CiSD
+input int       InpLiqLookback  = 20;   // Barre lookback pool liquidità
+input double    InpLiqBufferAtr = 0.1;  // Buffer sweep oltre il livello (ATR)
+input bool      InpLiqRequire   = false;// Richiedi sweep per entrare (hard-gate)
+input int       InpLiqScore     = 20;   // Bonus score su sweep+CiSD
+
 input group "═══ Rischio ═══"
 input double    InpRiskPct     = 0.5;  // Rischio % per trade
 input double    InpSLAtrMult   = 0.4;  // SL buffer ATR
@@ -120,6 +127,10 @@ double   g_tp2_px    = 0;
 double   g_sl_px     = 0;
 bool     g_tp1_hit   = false;
 bool     g_is_long   = false;
+
+// Liquidity sweep + CiSD state
+bool     g_liq_sweep_sell = false; // buy-side liquidity grab + rigetto → SELL
+bool     g_liq_sweep_buy  = false; // sell-side liquidity grab + rigetto → BUY
 
 // Effective values (set per modalità)
 bool   g_eff_use_session;
@@ -324,6 +335,9 @@ void ProcessNewBar()
 
    InvalidateZones(m15_c, m15_atr_v);
 
+   // Liquidity sweep + CiSD sul bar appena chiuso
+   DetectLiquiditySweep(m15_atr_v);
+
    // Retest zona
    bool price_at_supply = IsAtSupply(m15_h, m15_atr_v);
    bool price_at_demand = IsAtDemand(m15_l, m15_atr_v);
@@ -396,18 +410,25 @@ void ProcessNewBar()
    bool vol_high = (v_sma>0) && (v_now > v_sma * 1.2);
    if(vol_high)        { score_sell += 10; score_buy += 10; }
    if(atr_ok)          { score_sell += 10; score_buy += 10; }
+   // Bonus liquidità: sweep+CiSD è confluenza forte a favore del lato
+   if(g_liq_sweep_sell) score_sell += InpLiqScore;
+   if(g_liq_sweep_buy)  score_buy  += InpLiqScore;
 
    bool score_ok_sell = score_sell >= g_eff_min_score;
    bool score_ok_buy  = score_buy  >= g_eff_min_score;
+
+   // Gate opzionale: richiedi lo sweep di liquidità per entrare
+   bool liq_ok_sell = !InpLiqRequire || g_liq_sweep_sell;
+   bool liq_ok_buy  = !InpLiqRequire || g_liq_sweep_buy;
 
    // Segnali finali
    bool no_position = !HasOpenPosition();
    bool final_sell = confirm_sell && price_at_supply && h1_bear && m15_bear && rsi_ok_sell &&
                      hour_ok && atr_ok && news_ok && cooldown_ok && trades_ok &&
-                     day_ok && circuit_ok && score_ok_sell && no_position;
+                     day_ok && circuit_ok && score_ok_sell && liq_ok_sell && no_position;
    bool final_buy  = confirm_buy  && price_at_demand && h1_bull && m15_bull && rsi_ok_buy  &&
                      hour_ok && atr_ok && news_ok && cooldown_ok && trades_ok &&
-                     day_ok && circuit_ok && score_ok_buy  && no_position;
+                     day_ok && circuit_ok && score_ok_buy  && liq_ok_buy  && no_position;
 
    if(final_buy)  OpenLong (m15_l, m15_atr_v, atr_local);
    if(final_sell) OpenShort(m15_h, m15_atr_v, atr_local);
@@ -522,6 +543,42 @@ bool IsAtDemand(double m15_low, double atr_m15)
          m15_low >= g_dem_bots[i] - atr_m15 * g_eff_zone_tol)
          return true;
    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Liquidity Sweep + CiSD                                            |
+//| Buy-side liquidity  = massimo dei bar precedenti (stop dei buy)   |
+//| Sell-side liquidity = minimo dei bar precedenti (stop dei sell)   |
+//| Sweep+CiSD: il bar wicka OLTRE il pool ma RICHIUDE dall'altra      |
+//| parte con corpo direzionale = cambio di stato di consegna.        |
+//+------------------------------------------------------------------+
+void DetectLiquiditySweep(double atr_m15)
+{
+   g_liq_sweep_sell = false;
+   g_liq_sweep_buy  = false;
+   if(!InpUseLiquidity || atr_m15 <= 0) return;
+
+   // Pool calcolati sui bar precedenti al bar di sweep (shift 2..lookback+1)
+   int hi_idx = iHighest(_Symbol, PERIOD_M15, MODE_HIGH, InpLiqLookback, 2);
+   int lo_idx = iLowest (_Symbol, PERIOD_M15, MODE_LOW,  InpLiqLookback, 2);
+   if(hi_idx < 0 || lo_idx < 0) return;
+
+   double bsl = iHigh(_Symbol, PERIOD_M15, hi_idx); // buy-side liquidity
+   double ssl = iLow (_Symbol, PERIOD_M15, lo_idx); // sell-side liquidity
+
+   double o = iOpen (_Symbol, PERIOD_M15, 1);
+   double h = iHigh (_Symbol, PERIOD_M15, 1);
+   double l = iLow  (_Symbol, PERIOD_M15, 1);
+   double c = iClose(_Symbol, PERIOD_M15, 1);
+   double buf = atr_m15 * InpLiqBufferAtr;
+
+   // Sweep della buy-side liquidity + rigetto ribassista (CiSD down) → SELL
+   if(h > bsl + buf && c < bsl && c < o)
+      g_liq_sweep_sell = true;
+
+   // Sweep della sell-side liquidity + rigetto rialzista (CiSD up) → BUY
+   if(l < ssl - buf && c > ssl && c > o)
+      g_liq_sweep_buy = true;
 }
 
 //+------------------------------------------------------------------+
@@ -781,6 +838,11 @@ void UpdateDashboard()
    status += "Status: " + (pause_left>0 ? ("PAUSED " + IntegerToString(pause_left) + "g") : "ACTIVE") + "\n";
    status += "Supply zones: " + IntegerToString(ArraySize(g_sup_tops)) + "\n";
    status += "Demand zones: " + IntegerToString(ArraySize(g_dem_tops)) + "\n";
+   if(InpUseLiquidity)
+   {
+      string liq = g_liq_sweep_sell ? "SWEEP SELL ▼" : (g_liq_sweep_buy ? "SWEEP BUY ▲" : "—");
+      status += "Liquidità: " + liq + (InpLiqRequire ? " [gate ON]" : "") + "\n";
+   }
    if(HasOpenPosition())
    {
       status += "Posizione: " + (g_is_long ? "LONG" : "SHORT");
